@@ -1,0 +1,14 @@
+Scheduled Event,Interval (hrs),Man-Hours,Parts $ / event,Downtime
+PMI 1,480.0,500.0,50000.0,15 days
+PMI 2,960.0,1440.0,90000.0,42 days
+Spindle Lug,10.0,0.5,0.0,0.05 day
+40-Hour Inspection,40.0,20.0,1500.0,1 day
+120-Hour Inspection,120.0,60.0,3000.0,4 days
+360-Hour Inspection,360.0,50.0,5000.0,4 days
+720-Hour Inspection,720.0,70.0,6000.0,5 days
+6-Month Insp,,15.0,2000.0,1 day
+Annual Insp,,30.0,3500.0,2 days
+Oil Change,100.0,3.0,800.0,0.2 day
+Filter Replacement,200.0,4.0,1450.0,0.4 day
+90-day Corrosion Check,12.0,12.0,1650.0,1 day
+,,,,

@@ -1,0 +1,11 @@
+Unscheduled Event,Avg. Labour Hours,Labour Cost,Adjusted Parts Cost,Total Cost/Event,Downtime
+Avionics Fault (Comm/Nav),6,690,1450,2140,1
+Engine Sensor Fault,4,460,1750,2210,0.5
+Hydraulic Leak (Main),8,920,2400,3320,1
+Flight Control Rigging,10,1150,600,1750,1.5
+Electrical Short (DC Bus),12,1380,2100,3480,2
+Rotor Blade Vibration,14,1610,4200,5810,2
+Starter Generator Fault,5,575,2500,3075,0.8
+Cabin Environmental Fault,6,690,1200,1890,1
+Landing Gear Sensor Fault,3,345,950,1295,0.4
+Battery Fault (Ni-Cad),2,230,150,380,0.3

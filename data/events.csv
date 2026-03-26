@@ -1,0 +1,24 @@
+title,interval_hrs,man_hours,parts_cost,downtime,type,avg_labour_hours,labour_cost,total_cost
+PMI 1,480.0,500.0,50000,15 days,scheduled,,,
+PMI 2,960.0,1440.0,90000,42 days,scheduled,,,
+Spindle Lug,10.0,0.5,0,0.05 day,scheduled,,,
+40-Hour Inspection,40.0,20.0,1500,1 day,scheduled,,,
+120-Hour Inspection,120.0,60.0,3000,4 days,scheduled,,,
+360-Hour Inspection,360.0,50.0,5000,4 days,scheduled,,,
+720-Hour Inspection,720.0,70.0,6000,5 days,scheduled,,,
+6-Month Insp,,15.0,2000,1 day,scheduled,,,
+Annual Insp,,30.0,3500,2 days,scheduled,,,
+Oil Change,100.0,3.0,800,0.2 day,scheduled,,,
+Filter Replacement,200.0,4.0,1450,0.4 day,scheduled,,,
+90-day Corrosion Check,12.0,12.0,1650,1 day,scheduled,,,
+
+Avionics Fault (Comm/Nav),,,1450,1.0,unscheduled,6.0,690.0,2140.0
+Engine Sensor Fault,,,1750,0.5,unscheduled,4.0,460.0,2210.0
+Hydraulic Leak (Main),,,2400,1.0,unscheduled,8.0,920.0,3320.0
+Flight Control Rigging,,,600,1.5,unscheduled,10.0,1150.0,1750.0
+Electrical Short (DC Bus),,,2100,2.0,unscheduled,12.0,1380.0,3480.0
+Rotor Blade Vibration,,,4200,2.0,unscheduled,14.0,1610.0,5810.0
+Starter Generator Fault,,,2500,0.8,unscheduled,5.0,575.0,3075.0
+Cabin Environmental Fault,,,1200,1.0,unscheduled,6.0,690.0,1890.0
+Landing Gear Sensor Fault,,,950,0.4,unscheduled,3.0,345.0,1295.0
+Battery Fault (Ni-Cad),,,150,0.3,unscheduled,2.0,230.0,380.0

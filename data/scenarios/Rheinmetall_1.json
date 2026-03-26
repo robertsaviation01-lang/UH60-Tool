@@ -1,0 +1,23 @@
+{
+  "name": "Rheinmetall_1",
+  "saved_at": "2026-03-26T11:20:56.831764",
+  "currency": "USD",
+  "use_live_fx": false,
+  "fleet_size": 1,
+  "annual_hours_per_ac": 600,
+  "maintenance_mode": "Scheduled Event Library (detailed PMI)",
+  "annual_escalation": 5.0,
+  "planning_start_date": "2026-03-26",
+  "use_custom_ac_dates": false,
+  "years": 1,
+  "target_availability": 75.0,
+  "labour_rate": 115.0,
+  "labour_cost": 45.0,
+  "mgmt_fee_usd": 10000.0,
+  "hours_until_pmi": [
+    480
+  ],
+  "custom_ac_dates": [
+    "2026-03-26"
+  ]
+}

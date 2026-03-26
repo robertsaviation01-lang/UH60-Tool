@@ -1,0 +1,18 @@
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Local app/runtime artifacts
+.streamlit/*.toml
+!.streamlit/secrets.toml.example
+
+# Local backups
+backups/
