@@ -16,3 +16,7 @@ venv/
 
 # Local backups
 backups/
+
+# Local scenario working files
+data/scenarios/KDF.json
+data/scenarios/scenario_1.json
