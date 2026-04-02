@@ -116,9 +116,16 @@ def _is_parts_supply_only_mode(mode_value):
 def _is_unscheduled_library_mode(mode_value):
 	mode = str(mode_value or "").strip().lower()
 	return mode in {
+		"scheduled & unscheduled maintenance",
+		"scheduled and unscheduled maintenance",
+		"scheduled and unscheduled event library",
 		"scheduled & unscheduled event library",
 		"scheduled & unscheduled event library (all events)",
 	}
+
+
+def _expected_unscheduled_events(flight_hours):
+	return max(float(flight_hours or 0.0), 0.0) / 300.0
 
 
 def _count_events_for_ac_report(ac_idx, values, scheduled_df):
@@ -185,7 +192,8 @@ def _build_costings_dataframe(values, apply_escalation=True):
 	fleet_size = int(values["fleet_size"])
 	labour_rate = float(values.get("labour_rate", 0.0))
 	escalation_rate = float(values.get("annual_escalation", 0.0)) / 100.0
-	annual_management_fee = float(values.get("annual_management_fee_per_ac", 0.0)) * fleet_size
+	contingency_multiplier = 1.0 + (float(values.get("geographic_contingency_pct", 0.0)) / 100.0)
+	annual_management_fee = float(values.get("annual_management_fee_per_ac", 0.0)) * fleet_size * contingency_multiplier
 
 	year_windows = [
 		(planning_start_date + pd.DateOffset(years=y), planning_start_date + pd.DateOffset(years=y + 1))
@@ -256,8 +264,8 @@ def _build_costings_dataframe(values, apply_escalation=True):
 		is_manual_mode = _is_parts_supply_only_mode(values.get("maintenance_mode"))
 		if not is_manual_mode:
 			rows[y]["Manpower Hrs"] += man_hours
-			rows[y]["Manpower Cost"] += man_hours * labour_rate * esc
-		rows[y]["Parts Cost"] += parts_cost * values.get("conversion_factor", 1.0) * esc
+			rows[y]["Manpower Cost"] += man_hours * labour_rate * esc * contingency_multiplier
+		rows[y]["Parts Cost"] += parts_cost * values.get("conversion_factor", 1.0) * esc * contingency_multiplier
 
 	for ac_idx in range(fleet_size):
 		ac_start = _get_aircraft_start(values, ac_idx, planning_start_date)
@@ -266,8 +274,10 @@ def _build_costings_dataframe(values, apply_escalation=True):
 			continue
 
 		fh0 = float(values["hours_until_pmi"][ac_idx])
-		contract_duration_years = (ac_end - ac_start).days / 365.25
-		contract_fh = contract_duration_years * annual_hours
+		active_days = (ac_end - ac_start).days
+		full_contract_days = max((ac_start + pd.DateOffset(years=n_years) - ac_start).days, 1)
+		contract_fraction = active_days / full_contract_days
+		contract_fh = float(n_years) * annual_hours * contract_fraction
 		fh_tolerance = 1.0
 
 		pmi_cycle = ["pmi 1", "pmi 2"]
@@ -334,13 +344,26 @@ def _build_costings_dataframe(values, apply_escalation=True):
 			unsched_path = os.path.join("data", "unscheduled_events.csv")
 			if os.path.exists(unsched_path):
 				unsched_df = pd.read_csv(unsched_path)
-				n_events = int(max(contract_fh_end, 0.0) / 300)
-				for _, row in unsched_df.iterrows():
-					mh = float(row["Avg. Labour Hours"]) if pd.notna(row.get("Avg. Labour Hours")) else 0.0
-					parts = float(row["Adjusted Parts Cost"]) if pd.notna(row.get("Adjusted Parts Cost")) else 0.0
-					for n in range(n_events):
-						event_date = ac_start + pd.DateOffset(days=int((n + 1) * 365.25 * contract_duration_years / (n_events + 1)))
-						add_event_cost(event_date, mh, parts, ac_start, ac_end)
+				for y, (y_start, y_end) in enumerate(year_windows):
+					overlap_start = max(ac_start, y_start, planning_start_date)
+					overlap_end = min(ac_end, y_end, planning_end_date)
+					if overlap_end <= overlap_start:
+						continue
+					year_days = max((y_end - y_start).days, 1)
+					overlap_days = (overlap_end - overlap_start).days
+					year_fh = annual_hours * (overlap_days / year_days)
+					expected_events = _expected_unscheduled_events(year_fh)
+					if expected_events <= 0:
+						continue
+					esc = (1 + escalation_rate) ** y if apply_escalation else 1.0
+					is_manual_mode = _is_parts_supply_only_mode(values.get("maintenance_mode"))
+					for _, row in unsched_df.iterrows():
+						mh = float(row["Avg. Labour Hours"]) if pd.notna(row.get("Avg. Labour Hours")) else 0.0
+						parts = float(row["Adjusted Parts Cost"]) if pd.notna(row.get("Adjusted Parts Cost")) else 0.0
+						if not is_manual_mode:
+							rows[y]["Manpower Hrs"] += mh * expected_events
+							rows[y]["Manpower Cost"] += mh * expected_events * labour_rate * esc * contingency_multiplier
+						rows[y]["Parts Cost"] += parts * expected_events * values.get("conversion_factor", 1.0) * esc * contingency_multiplier
 
 	costings_df = pd.DataFrame(rows)
 	costings_df["Total Cost"] = costings_df["Manpower Cost"] + costings_df["Parts Cost"] + costings_df["Management Fee"]
@@ -373,7 +396,7 @@ def _build_maintenance_schedule_figure(values):
 			for _, row in unsched_df.iterrows():
 				event = row.get("Unscheduled Event")
 				if isinstance(event, str):
-					summary[event] = int(annual_hours / 300) * contract_years * fleet_size
+					summary[event] = _expected_unscheduled_events(annual_hours) * contract_years * fleet_size
 
 	plot_df = pd.DataFrame([
 		{"Event": k, "Total Events": v}
@@ -491,12 +514,12 @@ def _build_maintenance_timeline_figure(values):
 			unsched_path = os.path.join("data", "unscheduled_events.csv")
 			if os.path.exists(unsched_path):
 				unsched_df = pd.read_csv(unsched_path)
-				n_events = int(max(contract_fh_end, 0.0) / 300)
+				expected_events = _expected_unscheduled_events(contract_fh_end)
 				for _, row in unsched_df.iterrows():
 					mh = float(row.get("Avg. Labour Hours")) if pd.notna(row.get("Avg. Labour Hours")) else 0.0
-					for n in range(n_events):
-						event_date = ac_start + pd.DateOffset(days=int((n + 1) * 365.25 * contract_duration_years / (n_events + 1)))
-						add_record(event_date, mh, "Unscheduled", ac_start, ac_end)
+					if expected_events > 0:
+						event_date = ac_start + pd.DateOffset(days=int((ac_end - ac_start).days / 2))
+						add_record(event_date, mh * expected_events, "Unscheduled", ac_start, ac_end)
 
 	if not records:
 		return None
@@ -531,6 +554,8 @@ def _build_report_sections(values):
 	fleet_size = int(values["fleet_size"])
 	annual_hours = float(values["annual_hours_per_ac"])
 	contract_years = int(values["years"])
+	contingency_pct = float(values.get("geographic_contingency_pct", 0.0))
+	contingency_multiplier = 1.0 + (contingency_pct / 100.0)
 	contract_fleet_hours_nominal = fleet_size * annual_hours * contract_years
 	try:
 		costings_df_report = _build_costings_dataframe(values, apply_escalation=True)
@@ -541,7 +566,7 @@ def _build_report_sections(values):
 		contract_fleet_hours_phased = float(contract_fleet_hours_nominal)
 		contract_total_cost = 0.0
 		contract_avg_annual_cost = 0.0
-	annual_management_fee = float(values.get("annual_management_fee_per_ac", 0.0)) * fleet_size
+	annual_management_fee = float(values.get("annual_management_fee_per_ac", 0.0)) * fleet_size * contingency_multiplier
 	contract_management_fee = annual_management_fee * contract_years
 	management_fee_per_fh = (annual_management_fee / (fleet_size * annual_hours)) if fleet_size * annual_hours > 0 else 0.0
 
@@ -586,7 +611,7 @@ def _build_report_sections(values):
 	total_unsched_downtime_days = 0.0
 	if _is_unscheduled_library_mode(values.get("maintenance_mode")) and not unsched_df.empty:
 		for _, row in unsched_df.iterrows():
-			total_unsched_downtime_days += _parse_downtime_days(row.get("Downtime", 0.0)) * int(annual_hours / 300)
+			total_unsched_downtime_days += _parse_downtime_days(row.get("Downtime", 0.0)) * _expected_unscheduled_events(annual_hours)
 
 	total_days = 365 * fleet_size
 	tech_avail_pct = max(0.0, min((1 - ((total_sched_downtime_days + total_unsched_downtime_days) / total_days)) * 100, 100)) if total_days > 0 else 0.0
@@ -600,7 +625,7 @@ def _build_report_sections(values):
 		for _, row in unsched_df.iterrows():
 			event = row.get("Unscheduled Event")
 			if isinstance(event, str):
-				maintenance_summary[event] = int(annual_hours / 300) * contract_years * fleet_size
+				maintenance_summary[event] = _expected_unscheduled_events(annual_hours) * contract_years * fleet_size
 
 	sections = []
 	fh_delta = contract_fleet_hours_nominal - contract_fleet_hours_phased
@@ -617,6 +642,7 @@ def _build_report_sections(values):
 		f"FX Timestamp: {values.get('fx_timestamp', 'N/A')}",
 		f"FX Rate: 1 {values.get('currency')} = {float(values.get('rate_to_usd', 1.0)):.4f} USD",
 		f"FX Rate: 1 USD = {float(values.get('conversion_factor', 1.0)):.4f} {values.get('currency')}",
+		f"Geographic Contingency: {contingency_pct:.1f}%",
 	] + fh_lines + [
 		f"Contract Cost / FH: calculated in live dashboard",
 		f"Average Annual Cost: calculated in live dashboard",
@@ -648,6 +674,7 @@ def _build_report_sections(values):
 		f"Contract Management Fee: {_format_currency(currency_symbol, contract_management_fee, 0)}",
 		f"Annual Management Fee: {_format_currency(currency_symbol, annual_management_fee, 0)}",
 		f"Management Fee / FH: {_format_currency(currency_symbol, management_fee_per_fh, 2)}",
+		f"Geographic Contingency: {contingency_pct:.1f}%",
 		f"Labour Rate: {_format_currency(currency_symbol, float(values.get('labour_rate', 0.0)), 2)} per hour",
 		f"Escalation Rate: {float(values.get('annual_escalation', 0.0)):.1f}%",
 	]))
@@ -823,10 +850,11 @@ def show_dashboard(values):
 		_avg_annual_cost = 0.0
 
 	esc_pct = float(values.get("annual_escalation", 0.0))
+	contingency_pct = float(values.get("geographic_contingency_pct", 0.0))
 	if esc_pct > 0:
-		esc_note = f"With annual escalation of {esc_pct:.1f}%"
+		esc_note = f"With annual escalation of {esc_pct:.1f}% and geographic contingency of {contingency_pct:.1f}%"
 	else:
-		esc_note = "Without annual escalation"
+		esc_note = f"Without annual escalation (geographic contingency {contingency_pct:.1f}%)"
 
 	with col4:
 		st.metric("Contract Fleet Hours", f"{int(contract_fleet_hours)}")
@@ -901,15 +929,16 @@ def show_dashboard(values):
 		total_sched_downtime_days = 0
 
 	# Unscheduled Downtime: annual sum per aircraft
-	if _is_unscheduled_library_mode(values.get("maintenance_mode")):
+	unscheduled_mode_enabled = _is_unscheduled_library_mode(values.get("maintenance_mode")) or bool(values.get("use_unsched_event_library", False))
+	if unscheduled_mode_enabled:
 		try:
 			unsched_df = pd.read_csv(os.path.join("data", "unscheduled_events.csv"))
-			annual_hours = values["annual_hours_per_ac"]
+			annual_hours = float(values.get("annual_hours_per_ac", 0.0))
 			total_unsched_downtime_days = 0
+			expected_unsched_events = _expected_unscheduled_events(annual_hours)
 			for _, row in unsched_df.iterrows():
-				downtime = float(row["Downtime"]) if not pd.isna(row["Downtime"]) else 0.0
-				n_events = int(annual_hours / 300)  # 1 per 300 FH, integer division
-				total_unsched_downtime_days += downtime * n_events
+				downtime = _parse_downtime_days(row.get("Downtime", 0.0))
+				total_unsched_downtime_days += downtime * expected_unsched_events
 		except Exception:
 			total_unsched_downtime_days = 0
 	else:
@@ -1099,7 +1128,7 @@ for i, tab in enumerate(selected_tab):
 					planning_years = sidebar_values["years"]
 					for _, row in unsched_df.iterrows():
 						event = row["Unscheduled Event"]
-						n_events = int(annual_hours / 300) * planning_years
+						n_events = _expected_unscheduled_events(annual_hours) * planning_years
 						summary[event] = n_events * (fleet_size if selected_ac == "Fleet" else 1)
 						event_lookup[event] = {
 							"Man-Hours": float(row["Avg. Labour Hours"]) if not pd.isna(row["Avg. Labour Hours"]) else 0.0,
@@ -1132,7 +1161,8 @@ for i, tab in enumerate(selected_tab):
 				vals = event_lookup.get(orig_name, event_lookup.get(e, {"Man-Hours": 0.0, "Parts $ / event": 0.0, "Downtime": ""}))
 				total_events_list.append(n)
 				forecast_mh.append(n * vals["Man-Hours"])
-				forecast_parts.append(n * vals["Parts $ / event"])
+				contingency_multiplier = float(sidebar_values.get("geographic_contingency_multiplier", 1.0))
+				forecast_parts.append(n * vals["Parts $ / event"] * contingency_multiplier)
 				forecast_downtime.append(forecast_downtime_days(vals["Downtime"], n))
 
 			summary_table = pd.DataFrame({
@@ -1293,12 +1323,11 @@ for i, tab in enumerate(selected_tab):
 										next_event_fh += interval
 
 					# Optional unscheduled downtime events
-					n_events_unsched = int(annual_hours / 300) * int(contract_duration_years)
+					n_events_unsched = _expected_unscheduled_events(annual_hours * contract_duration_years)
 					if n_events_unsched > 0 and len(unsched_downtime_days) > 0:
 						for downtime_days in unsched_downtime_days:
-							for n in range(n_events_unsched):
-								event_date = ac_start_date + pd.DateOffset(days=int((n + 1) * 365.25 * contract_duration_years / (n_events_unsched + 1)))
-								add_unavailable(event_date, downtime_days)
+							event_date = ac_start_date + pd.DateOffset(days=int(((ac_end_date - ac_start_date).days) / 2))
+							add_unavailable(event_date, downtime_days * n_events_unsched)
 
 					for month_start in month_starts:
 						month_end = month_start + pd.DateOffset(months=1)
@@ -1478,11 +1507,11 @@ for i, tab in enumerate(selected_tab):
 							if os.path.exists(unsched_path):
 								unsched_df = pd.read_csv(unsched_path)
 								for _, row in unsched_df.iterrows():
-									n_events = int(annual_hours / 300) * int(contract_duration_years)
-									for n in range(n_events):
-										event_date = ac_start_date + pd.DateOffset(days=int((n+1) * 365.25 * contract_duration_years / (n_events+1)))
+									expected_events = _expected_unscheduled_events(annual_hours * contract_duration_years)
+									if expected_events > 0:
+										event_date = ac_start_date + pd.DateOffset(days=int((contract_end_date - ac_start_date).days / 2))
 										if in_display_window(event_date):
-											manpower = row["Avg. Labour Hours"] if "Avg. Labour Hours" in row else 0
+											manpower = (row["Avg. Labour Hours"] if "Avg. Labour Hours" in row else 0) * expected_events
 											months_since_start = (event_date.year - planning_start_date.year) * 12 + (event_date.month - planning_start_date.month)
 											timeline.append({"Aircraft": f"Aircraft {ac_idx+1}", "Event": row["Unscheduled Event"], "Date": event_date, "Month": months_since_start, "Manpower": manpower, "Type": "Unscheduled"})
 						if ac_start_date > planning_start_date and ac_start_date < planning_end_date:
@@ -1606,7 +1635,8 @@ for i, tab in enumerate(selected_tab):
 			n_years = int(sidebar_values["years"])
 			annual_hours = float(sidebar_values["annual_hours_per_ac"])
 			fleet_size = int(sidebar_values["fleet_size"])
-			annual_management_fee = float(sidebar_values.get("annual_management_fee_per_ac", 0.0)) * fleet_size
+			contingency_multiplier = float(sidebar_values.get("geographic_contingency_multiplier", 1.0))
+			annual_management_fee = float(sidebar_values.get("annual_management_fee_per_ac", 0.0)) * fleet_size * contingency_multiplier
 			labour_rate = float(sidebar_values.get("labour_rate", 0.0))
 			st.markdown("### Annual Costings by Contract Year")
 			st.dataframe(
@@ -1628,8 +1658,8 @@ for i, tab in enumerate(selected_tab):
 			contract_management_fee = annual_management_fee * n_years
 			management_fee_per_fh = (annual_management_fee / (annual_hours * fleet_size)) if (annual_hours * fleet_size) > 0 else 0.0
 			labour_cost = float(sidebar_values.get("labour_cost", 0.0))
-			contract_manpower_cost_delta = (labour_rate - labour_cost) * contract_manpower_hours_total
-			manpower_delta_per_fh = ((labour_rate - labour_cost) * contract_manpower_hours_total / contract_fh_total) if contract_fh_total > 0 else 0.0
+			contract_manpower_cost_delta = (labour_rate - labour_cost) * contract_manpower_hours_total * contingency_multiplier
+			manpower_delta_per_fh = (((labour_rate - labour_cost) * contract_manpower_hours_total * contingency_multiplier) / contract_fh_total) if contract_fh_total > 0 else 0.0
 			with c1:
 				st.metric("Contract FH", f"{costings_df['Total FH'].sum():.1f}")
 				st.metric("Contract Management Fee", f"{sidebar_values['currency_symbol']}{contract_management_fee:,.0f}")

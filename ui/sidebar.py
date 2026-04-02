@@ -59,6 +59,9 @@ def _apply_loaded_scenario(data):
         "part only": "Parts Supply Only",
         "parts only": "Parts Supply Only",
         "parts supply only": "Parts Supply Only",
+        "scheduled & unscheduled maintenance": "Scheduled & Unscheduled Event Library (all events)",
+        "scheduled and unscheduled maintenance": "Scheduled & Unscheduled Event Library (all events)",
+        "scheduled and unscheduled event library": "Scheduled & Unscheduled Event Library (all events)",
         "scheduled event library (detailed pmi)": "Scheduled Event Library (detailed PMI)",
         "scheduled & unscheduled event library": "Scheduled & Unscheduled Event Library (all events)",
         "scheduled & unscheduled event library (all events)": "Scheduled & Unscheduled Event Library (all events)",
@@ -72,6 +75,7 @@ def _apply_loaded_scenario(data):
     st.session_state["labour_rate_input"] = float(data.get("labour_rate", 115.0))
     st.session_state["labour_cost_input"] = float(data.get("labour_cost", 45.0))
     st.session_state["mgmt_fee_usd"] = float(data.get("mgmt_fee_usd", 10000.0))
+    st.session_state["geographic_contingency_pct_input"] = float(data.get("geographic_contingency_pct", 0.0))
 
     loaded_hours = data.get("hours_until_pmi", [])
     loaded_dates = data.get("custom_ac_dates", [])
@@ -103,6 +107,7 @@ def _collect_scenario_payload():
         "labour_rate": float(st.session_state.get("labour_rate_input", 115.0)),
         "labour_cost": float(st.session_state.get("labour_cost_input", 45.0)),
         "mgmt_fee_usd": float(st.session_state.get("mgmt_fee_usd", 10000.0)),
+        "geographic_contingency_pct": float(st.session_state.get("geographic_contingency_pct_input", 0.0)),
     }
 
     fleet_size = payload["fleet_size"]
@@ -184,6 +189,7 @@ def show_sidebar():
     st.session_state.setdefault("labour_rate_input", 115.0)
     st.session_state.setdefault("labour_cost_input", 45.0)
     st.session_state.setdefault("use_live_fx_toggle", False)
+    st.session_state.setdefault("geographic_contingency_pct_input", 0.0)
 
     # Currency selection
     st.sidebar.markdown("**Currency Settings**")
@@ -245,6 +251,16 @@ def show_sidebar():
     annual_escalation = st.sidebar.number_input(
         "Annual escalation rate (%)", min_value=0.0, max_value=20.0, step=0.5, key="annual_escalation_input"
     )
+
+    st.sidebar.subheader("Geographic Contingency")
+    geographic_contingency_pct = st.sidebar.slider(
+        "Geographic contingency (%)",
+        min_value=0.0,
+        max_value=50.0,
+        step=0.5,
+        key="geographic_contingency_pct_input"
+    )
+    st.sidebar.caption("Applied to customer-facing manpower, parts, and management fee costs.")
 
 
 
@@ -339,6 +355,8 @@ def show_sidebar():
         "use_event_table": use_event_table,
         "use_unsched_event_library": use_unsched_event_library,
         "annual_escalation": annual_escalation,
+        "geographic_contingency_pct": geographic_contingency_pct,
+        "geographic_contingency_multiplier": 1 + (geographic_contingency_pct / 100.0),
         "planning_start_date": planning_start_date,
         "use_custom_ac_dates": use_custom_ac_dates,
         "custom_ac_dates": custom_ac_dates,
