@@ -19,6 +19,8 @@ from ui.sidebar import show_sidebar
 
 st.set_page_config(page_title="UH-60 Maintenance Model", layout="wide")
 
+APP_MODEL_VERSION = "v1.1.0"
+
 
 def _get_app_password():
 	try:
@@ -44,6 +46,7 @@ def _require_password():
 		return
 
 	st.title("UH-60 Maintenance Modelling App")
+	st.caption(f"Model Version: {APP_MODEL_VERSION}")
 	st.subheader("Restricted Access")
 	st.write("Enter the app password to continue.")
 
@@ -60,11 +63,13 @@ def _require_password():
 _require_password()
 
 st.title("UH-60 Maintenance Modelling App")
+st.caption(f"Model Version: {APP_MODEL_VERSION}")
 st.write("Welcome! This is the entry point for the UH-60 maintenance modeling tool.")
 
 # Show sidebar and get all sidebar values
 
 sidebar_values = show_sidebar()
+st.sidebar.caption(f"Model Version: {APP_MODEL_VERSION}")
 
 
 def _format_currency(symbol, value, decimals=0):
