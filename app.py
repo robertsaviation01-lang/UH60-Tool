@@ -11,8 +11,10 @@ import shutil
 import base64
 import hmac
 import plotly.express as px
+import plotly.graph_objects as go
 from io import BytesIO
 from urllib.parse import quote
+import math
 
 # Import sidebar component
 from ui.sidebar import show_sidebar
@@ -69,11 +71,34 @@ st.write("Welcome! This is the entry point for the UH-60 maintenance modeling to
 # Show sidebar and get all sidebar values
 
 sidebar_values = show_sidebar()
+
+# Carry session-scoped MRO operating costs into the main model values dict.
+for _overhead_key in [
+	"mro_cost_insurance",
+	"mro_cost_facility",
+	"mro_cost_gse",
+	"mro_cost_tooling",
+	"mro_cost_engine_bay",
+	"mro_cost_rotables_store",
+	"mro_cost_parts_store",
+	"mro_cost_utilities",
+	"mro_cost_it_quality",
+]:
+	sidebar_values[_overhead_key] = float(st.session_state.get(_overhead_key, 0.0))
+
 st.sidebar.caption(f"Model Version: {APP_MODEL_VERSION}")
 
 
 def _format_currency(symbol, value, decimals=0):
 	return f"{symbol}{value:,.{decimals}f}"
+
+
+def _display_conversion_factor(values):
+	try:
+		factor = float(values.get("conversion_factor", 1.0))
+		return factor if factor > 0 else 1.0
+	except Exception:
+		return 1.0
 
 
 def _plotly_export_config(filename):
@@ -103,6 +128,8 @@ def _parse_downtime_days(value):
 
 
 def _get_aircraft_start(values, ac_idx, planning_start_date):
+	if values.get("use_custom_ac_dates") and int(values.get("fleet_size", 1)) > 2:
+		return planning_start_date + pd.DateOffset(months=3 * (ac_idx // 2))
 	if values.get("use_custom_ac_dates") and len(values.get("custom_ac_dates", [])) > ac_idx:
 		return pd.to_datetime(values["custom_ac_dates"][ac_idx])
 	return planning_start_date
@@ -131,6 +158,28 @@ def _is_unscheduled_library_mode(mode_value):
 
 def _expected_unscheduled_events(flight_hours):
 	return max(float(flight_hours or 0.0), 0.0) / 300.0
+
+
+def _mro_overhead_categories():
+	return [
+		("Insurance", "mro_cost_insurance"),
+		("Facility Costs", "mro_cost_facility"),
+		("GSE", "mro_cost_gse"),
+		("UH-60 Specialist Tooling", "mro_cost_tooling"),
+		("Engine Bay", "mro_cost_engine_bay"),
+		("Rotables Store", "mro_cost_rotables_store"),
+		("Parts Store", "mro_cost_parts_store"),
+		("Utilities", "mro_cost_utilities"),
+		("IT/Quality/Compliance", "mro_cost_it_quality"),
+	]
+
+
+def _annual_mro_overheads_from_values(values):
+	annual_costs = {}
+	for label, key in _mro_overhead_categories():
+		annual_costs[label] = float(values.get(key, 0.0))
+	annual_total = sum(annual_costs.values())
+	return annual_costs, annual_total
 
 
 def _count_events_for_ac_report(ac_idx, values, scheduled_df):
@@ -198,7 +247,8 @@ def _build_costings_dataframe(values, apply_escalation=True):
 	labour_rate = float(values.get("labour_rate", 0.0))
 	escalation_rate = float(values.get("annual_escalation", 0.0)) / 100.0
 	contingency_multiplier = 1.0 + (float(values.get("geographic_contingency_pct", 0.0)) / 100.0)
-	annual_management_fee = float(values.get("annual_management_fee_per_ac", 0.0)) * fleet_size * contingency_multiplier
+	annual_management_fee = float(values.get("annual_management_fee_per_ac", 0.0)) * fleet_size
+	overhead_annual_by_category, _ = _annual_mro_overheads_from_values(values)
 
 	year_windows = [
 		(planning_start_date + pd.DateOffset(years=y), planning_start_date + pd.DateOffset(years=y + 1))
@@ -215,6 +265,11 @@ def _build_costings_dataframe(values, apply_escalation=True):
 
 	rows = []
 	for y, (y_start, y_end) in enumerate(year_windows):
+		esc = (1 + escalation_rate) ** y if apply_escalation else 1.0
+		overhead_values = {
+			label: amount * esc * contingency_multiplier
+			for label, amount in overhead_annual_by_category.items()
+		}
 		rows.append({
 			"Contract Year": y + 1,
 			"Period": f"{y_start.strftime('%d/%m/%Y')} - {(y_end - pd.Timedelta(days=1)).strftime('%d/%m/%Y')}",
@@ -222,7 +277,9 @@ def _build_costings_dataframe(values, apply_escalation=True):
 			"Manpower Hrs": 0.0,
 			"Manpower Cost": 0.0,
 			"Parts Cost": 0.0,
-			"Management Fee": annual_management_fee,
+			"Management Fee": annual_management_fee * esc,
+			**overhead_values,
+			"MRO Overheads": sum(overhead_values.values()),
 		})
 
 	for ac_idx in range(fleet_size):
@@ -270,7 +327,7 @@ def _build_costings_dataframe(values, apply_escalation=True):
 		if not is_manual_mode:
 			rows[y]["Manpower Hrs"] += man_hours
 			rows[y]["Manpower Cost"] += man_hours * labour_rate * esc * contingency_multiplier
-		rows[y]["Parts Cost"] += parts_cost * values.get("conversion_factor", 1.0) * esc * contingency_multiplier
+		rows[y]["Parts Cost"] += parts_cost * esc * contingency_multiplier
 
 	for ac_idx in range(fleet_size):
 		ac_start = _get_aircraft_start(values, ac_idx, planning_start_date)
@@ -368,10 +425,15 @@ def _build_costings_dataframe(values, apply_escalation=True):
 						if not is_manual_mode:
 							rows[y]["Manpower Hrs"] += mh * expected_events
 							rows[y]["Manpower Cost"] += mh * expected_events * labour_rate * esc * contingency_multiplier
-						rows[y]["Parts Cost"] += parts * expected_events * values.get("conversion_factor", 1.0) * esc * contingency_multiplier
+						rows[y]["Parts Cost"] += parts * expected_events * esc * contingency_multiplier
 
 	costings_df = pd.DataFrame(rows)
-	costings_df["Total Cost"] = costings_df["Manpower Cost"] + costings_df["Parts Cost"] + costings_df["Management Fee"]
+	costings_df["Total Cost"] = (
+		costings_df["Manpower Cost"]
+		+ costings_df["Parts Cost"]
+		+ costings_df["Management Fee"]
+		+ costings_df["MRO Overheads"]
+	)
 	return costings_df
 
 
@@ -548,6 +610,202 @@ def _build_maintenance_timeline_figure(values):
 	return fig
 
 
+@st.cache_data(show_spinner=False)
+def _build_costings_fh_cost_figure(values):
+	try:
+		costings_df = _build_costings_dataframe(values, apply_escalation=True)
+	except Exception:
+		return None
+
+	contract_fh_total = float(costings_df["Total FH"].sum()) if "Total FH" in costings_df.columns else 0.0
+	if contract_fh_total <= 0:
+		return None
+
+	display_factor = _display_conversion_factor(values)
+	cs = values.get("currency_symbol", "$")
+	component_items = ["Manpower Cost", "Parts Cost", "Management Fee", "MRO Overheads"]
+	present_components = [item for item in component_items if item in costings_df.columns]
+	if not present_components:
+		return None
+
+	component_values = [
+		(float(costings_df[item].sum()) / contract_fh_total) * display_factor
+		for item in present_components
+	]
+	line_x = present_components + ["Total Cost"]
+	line_y = []
+	running_total = 0.0
+	for val in component_values:
+		running_total += val
+		line_y.append(running_total)
+	line_y.append(running_total)
+
+	fig = go.Figure()
+	fig.add_trace(go.Bar(
+		x=present_components,
+		y=component_values,
+		name="Cost Components",
+		text=[f"{cs}{v:,.0f}" for v in component_values],
+		textposition="outside",
+	))
+	fig.add_trace(go.Scatter(
+		x=line_x,
+		y=line_y,
+		mode="lines+markers+text",
+		name="Total Cost (Cumulative)",
+		line={"width": 3},
+		text=[f"{cs}{v:,.0f}" for v in line_y],
+		textposition="top center",
+	))
+	fig.update_layout(
+		title="Annual Costings by Contract Year: FH Cost by Costing Item",
+		yaxis_tickformat=",.0f",
+		xaxis_title="Costing Item",
+		yaxis_title=f"FH Cost ({cs})",
+	)
+	return fig
+
+
+@st.cache_data(show_spinner=False)
+def _build_overheads_fh_cost_figure(values):
+	try:
+		costings_df = _build_costings_dataframe(values, apply_escalation=True)
+	except Exception:
+		return None
+
+	contract_fh_total = float(costings_df["Total FH"].sum()) if "Total FH" in costings_df.columns else 0.0
+	if contract_fh_total <= 0:
+		return None
+
+	overhead_cols_present = [label for label, _ in _mro_overhead_categories() if label in costings_df.columns]
+	if not overhead_cols_present:
+		return None
+
+	display_factor = _display_conversion_factor(values)
+	cs = values.get("currency_symbol", "$")
+	overhead_component_values = [
+		(float(costings_df[col].sum()) / contract_fh_total) * display_factor
+		for col in overhead_cols_present
+	]
+	overhead_line_x = overhead_cols_present + ["MRO Overheads"]
+	overhead_line_y = []
+	overhead_running_total = 0.0
+	for val in overhead_component_values:
+		overhead_running_total += val
+		overhead_line_y.append(overhead_running_total)
+	overhead_line_y.append(overhead_running_total)
+
+	fig = go.Figure()
+	fig.add_trace(go.Bar(
+		x=overhead_cols_present,
+		y=overhead_component_values,
+		name="Overhead Components",
+		text=[f"{cs}{v:,.0f}" for v in overhead_component_values],
+		textposition="outside",
+	))
+	fig.add_trace(go.Scatter(
+		x=overhead_line_x,
+		y=overhead_line_y,
+		mode="lines+markers+text",
+		name="MRO Overheads (Cumulative)",
+		line={"width": 3},
+		text=[f"{cs}{v:,.0f}" for v in overhead_line_y],
+		textposition="top center",
+	))
+	fig.update_layout(
+		title="Annual MRO Overheads Breakdown: FH Cost by Overhead Item",
+		yaxis_tickformat=",.0f",
+		xaxis_title="Overhead Item",
+		yaxis_title=f"FH Cost ({cs})",
+	)
+	return fig
+
+
+def _compute_mro_staffing(values):
+	"""Derive MRO staffing estimates from model values dict. Returns a dict."""
+	mp_productive_hrs = int(values.get("mp_productive_hrs", 1500))
+	mp_engineer_ratio = int(values.get("mp_engineer_ratio", 3))
+	mp_qc_ratio = int(values.get("mp_qc_ratio", 8))
+	mp_parts_ratio = int(values.get("mp_parts_ratio", 4))
+	mp_include_planning = bool(values.get("mp_include_planning", True))
+	mp_shift_coverage = str(values.get("mp_shift_coverage", "Single shift (1×)"))
+	shift_mult = 2.0 if mp_shift_coverage.startswith("Double") else 1.0
+	fleet_size = int(values.get("fleet_size", 1))
+	contract_years = int(values.get("years", 1))
+	labour_rate = float(values.get("labour_rate", 0.0))
+	labour_cost_rate = float(values.get("labour_cost", 0.0))
+	contingency_multiplier = 1.0 + float(values.get("geographic_contingency_pct", 0.0)) / 100.0
+	try:
+		cdf = _build_costings_dataframe(values, apply_escalation=True)
+		annual_avg_mh = float(cdf["Manpower Hrs"].sum()) / contract_years if contract_years > 0 else 0.0
+		year_rows = cdf.to_dict("records")
+	except Exception:
+		annual_avg_mh = 0.0
+		year_rows = []
+	direct_staff_raw = (annual_avg_mh / mp_productive_hrs * shift_mult) if mp_productive_hrs > 0 else 0.0
+	direct_staff = max(1, math.ceil(direct_staff_raw)) if annual_avg_mh > 0 else 0
+	lae_count = max(1, math.ceil(direct_staff / (mp_engineer_ratio + 1))) if direct_staff > 0 else 0
+	mechanic_count = max(0, direct_staff - lae_count)
+	qc_count = max(1, math.ceil(direct_staff / mp_qc_ratio)) if direct_staff > 0 else 1
+	parts_count = max(1, math.ceil(fleet_size / mp_parts_ratio))
+	planning_count = 1 if mp_include_planning else 0
+	total_staff = direct_staff + qc_count + parts_count + planning_count
+	utilisation_pct = (
+		(annual_avg_mh / (direct_staff * mp_productive_hrs) * 100.0)
+		if direct_staff * mp_productive_hrs > 0 else 0.0
+	)
+	annual_staff_cost = total_staff * mp_productive_hrs * labour_cost_rate
+	annual_charge = total_staff * mp_productive_hrs * labour_rate * contingency_multiplier
+	per_year = []
+	for yr in year_rows:
+		yr_mh = float(yr.get("Manpower Hrs", 0.0))
+		yr_direct_raw = (yr_mh / mp_productive_hrs * shift_mult) if mp_productive_hrs > 0 else 0.0
+		yr_direct = max(1, math.ceil(yr_direct_raw)) if yr_mh > 0 else 0
+		yr_lae = max(1, math.ceil(yr_direct / (mp_engineer_ratio + 1))) if yr_direct > 0 else 0
+		yr_mech = max(0, yr_direct - yr_lae)
+		yr_qc = max(1, math.ceil(yr_direct / mp_qc_ratio)) if yr_direct > 0 else 1
+		yr_parts = max(1, math.ceil(fleet_size / mp_parts_ratio))
+		yr_planning = planning_count
+		yr_total = yr_direct + yr_qc + yr_parts + yr_planning
+		yr_util = (yr_mh / (yr_direct * mp_productive_hrs) * 100.0) if yr_direct * mp_productive_hrs > 0 else 0.0
+		yr_staff_cost = yr_total * mp_productive_hrs * labour_cost_rate
+		yr_charge = yr_total * mp_productive_hrs * labour_rate * contingency_multiplier
+		per_year.append({
+			"year": int(yr.get("Contract Year", 0)),
+			"period": str(yr.get("Period", "")),
+			"mh": yr_mh,
+			"lae": yr_lae,
+			"mechanics": yr_mech,
+			"qc": yr_qc,
+			"parts": yr_parts,
+			"planning": yr_planning,
+			"total": yr_total,
+			"util_pct": yr_util,
+			"staff_cost": yr_staff_cost,
+			"charge": yr_charge,
+		})
+	return {
+		"mp_productive_hrs": mp_productive_hrs,
+		"mp_engineer_ratio": mp_engineer_ratio,
+		"mp_qc_ratio": mp_qc_ratio,
+		"mp_parts_ratio": mp_parts_ratio,
+		"mp_include_planning": mp_include_planning,
+		"mp_shift_coverage": mp_shift_coverage,
+		"lae_count": lae_count,
+		"mechanic_count": mechanic_count,
+		"qc_count": qc_count,
+		"parts_count": parts_count,
+		"planning_count": planning_count,
+		"direct_staff": direct_staff,
+		"total_staff": total_staff,
+		"utilisation_pct": utilisation_pct,
+		"annual_avg_mh": annual_avg_mh,
+		"annual_staff_cost": annual_staff_cost,
+		"annual_charge": annual_charge,
+		"per_year": per_year,
+	}
+
+
 def _build_report_sections(values):
 	scheduled_path = os.path.join("data", "scheduled_events.csv")
 	unsched_path = os.path.join("data", "unscheduled_events.csv")
@@ -555,6 +813,7 @@ def _build_report_sections(values):
 	unsched_df = pd.read_csv(unsched_path) if os.path.exists(unsched_path) else pd.DataFrame()
 
 	currency_symbol = values["currency_symbol"]
+	display_factor = _display_conversion_factor(values)
 	planning_start_date = pd.to_datetime(values["planning_start_date"])
 	fleet_size = int(values["fleet_size"])
 	annual_hours = float(values["annual_hours_per_ac"])
@@ -567,13 +826,23 @@ def _build_report_sections(values):
 		contract_fleet_hours_phased = float(costings_df_report["Total FH"].sum())
 		contract_total_cost = float(costings_df_report["Total Cost"].sum())
 		contract_avg_annual_cost = (contract_total_cost / contract_years) if contract_years > 0 else 0.0
+		contract_overheads = float(costings_df_report["MRO Overheads"].sum()) if "MRO Overheads" in costings_df_report.columns else 0.0
+		contract_management_fee = float(costings_df_report["Management Fee"].sum()) if "Management Fee" in costings_df_report.columns else 0.0
+		annual_management_fee = (contract_management_fee / contract_years) if contract_years > 0 else 0.0
 	except Exception:
 		contract_fleet_hours_phased = float(contract_fleet_hours_nominal)
 		contract_total_cost = 0.0
 		contract_avg_annual_cost = 0.0
-	annual_management_fee = float(values.get("annual_management_fee_per_ac", 0.0)) * fleet_size * contingency_multiplier
-	contract_management_fee = annual_management_fee * contract_years
-	management_fee_per_fh = (annual_management_fee / (fleet_size * annual_hours)) if fleet_size * annual_hours > 0 else 0.0
+		contract_overheads = 0.0
+		_base_annual_mgmt_fee = float(values.get("annual_management_fee_per_ac", 0.0)) * fleet_size
+		_esc_rate = float(values.get("annual_escalation", 0.0)) / 100.0
+		contract_management_fee = sum(
+			_base_annual_mgmt_fee * (1 + _esc_rate) ** y for y in range(contract_years)
+		) if contract_years > 0 else 0.0
+		annual_management_fee = (contract_management_fee / contract_years) if contract_years > 0 else _base_annual_mgmt_fee
+	annual_overheads_base, annual_overheads_total = _annual_mro_overheads_from_values(values)
+	annual_overheads_total_loaded = annual_overheads_total * contingency_multiplier
+	management_fee_per_fh = (contract_management_fee / contract_fleet_hours_phased) if contract_fleet_hours_phased > 0 else 0.0
 
 	# Dashboard-like downtime and availability summary.
 	total_sched_downtime_days = 0.0
@@ -639,6 +908,7 @@ def _build_report_sections(values):
 		fh_lines.append(f"Contract Fleet Hours (Nominal): {contract_fleet_hours_nominal:,.1f}")
 		fh_lines.append("Note: Difference reflects phased aircraft introduction over the contract period.")
 	sections.append(("Dashboard", [
+		f"Scenario: {values.get('scenario_name', 'N/A')}",
 		f"Fleet Size: {fleet_size}",
 		f"Annual Fleet (FH): {int(fleet_size * annual_hours)}",
 		f"Contract Length: {contract_years} years",
@@ -669,19 +939,24 @@ def _build_report_sections(values):
 	] + [f"- Aircraft {idx + 1} start: {_get_aircraft_start(values, idx, planning_start_date).strftime('%d/%m/%Y')}" for idx in range(fleet_size)]))
 	sections.append(("Costings", [
 		f"Contract Period: {planning_start_date.strftime('%d/%m/%Y')} - {(planning_start_date + pd.DateOffset(years=contract_years) - pd.Timedelta(days=1)).strftime('%d/%m/%Y')}",
-		f"Contract Average Annual Cost: {_format_currency(currency_symbol, contract_avg_annual_cost, 0)}",
-		f"Total Contract Cost: {_format_currency(currency_symbol, contract_total_cost, 0)}",
+		f"Contract Average Annual Cost: {_format_currency(currency_symbol, contract_avg_annual_cost * display_factor, 0)}",
+		f"Total Contract Cost: {_format_currency(currency_symbol, contract_total_cost * display_factor, 0)}",
+		f"Annual MRO Overheads (loaded): {_format_currency(currency_symbol, annual_overheads_total_loaded * display_factor, 0)}",
+		f"Contract MRO Overheads: {_format_currency(currency_symbol, contract_overheads * display_factor, 0)}",
 		f"Contract FH (Phased): {contract_fleet_hours_phased:,.1f}",
 		f"Contract FH (Nominal): {contract_fleet_hours_nominal:,.1f}",
 		f"Display Currency: {values.get('currency')}",
 		f"FX Source: {values.get('fx_source', 'Static model assumption')}",
 		f"FX Timestamp: {values.get('fx_timestamp', 'N/A')}",
-		f"Contract Management Fee: {_format_currency(currency_symbol, contract_management_fee, 0)}",
-		f"Annual Management Fee: {_format_currency(currency_symbol, annual_management_fee, 0)}",
-		f"Management Fee / FH: {_format_currency(currency_symbol, management_fee_per_fh, 2)}",
+		f"Contract Management Fee: {_format_currency(currency_symbol, contract_management_fee * display_factor, 0)}",
+		f"Annual Management Fee: {_format_currency(currency_symbol, annual_management_fee * display_factor, 0)}",
+		f"Management Fee / FH: {_format_currency(currency_symbol, management_fee_per_fh * display_factor, 2)}",
 		f"Geographic Contingency: {contingency_pct:.1f}%",
-		f"Labour Rate: {_format_currency(currency_symbol, float(values.get('labour_rate', 0.0)), 2)} per hour",
+		f"Labour Rate: {_format_currency(currency_symbol, float(values.get('labour_rate', 0.0)) * display_factor, 2)} per hour",
 		f"Escalation Rate: {float(values.get('annual_escalation', 0.0)):.1f}%",
+	] + [
+		f"{label}: {_format_currency(currency_symbol, amount * contingency_multiplier * display_factor, 0)} per year"
+		for label, amount in annual_overheads_base.items()
 	]))
 	sections.append(("Event Library", [
 		f"Scheduled Events Rows: {len(scheduled_df)}",
@@ -691,10 +966,39 @@ def _build_report_sections(values):
 		"Unscheduled Events Preview:",
 	] + (unsched_df.head(8).to_string(index=False).splitlines() if not unsched_df.empty else ["No unscheduled events loaded."])))
 
+	mro = _compute_mro_staffing(values)
+	cs = currency_symbol
+	mro_lines = [
+		f"Productive hrs/person/year: {mro['mp_productive_hrs']}",
+		f"Mechanics per LAE: {mro['mp_engineer_ratio']}",
+		f"Direct maintainers per QC Inspector: {mro['mp_qc_ratio']}",
+		f"Aircraft per Parts Coordinator: {mro['mp_parts_ratio']}",
+		f"Shift coverage: {mro['mp_shift_coverage']}",
+		f"Planning Officer included: {'Yes' if mro['mp_include_planning'] else 'No'}",
+		"",
+		f"Licensed Aircraft Engineers (LAE): {mro['lae_count']}",
+		f"Aircraft Mechanics: {mro['mechanic_count']}",
+		f"QC / QA Inspectors: {mro['qc_count']}",
+		f"Parts / Logistics Coordinators: {mro['parts_count']}",
+		f"Planning & Engineering Officers: {mro['planning_count']}",
+		f"Total Headcount: {mro['total_staff']}",
+		f"Direct Staff Utilisation: {mro['utilisation_pct']:.1f}%",
+		f"Annual Staff Cost: {_format_currency(cs, mro['annual_staff_cost'] * display_factor, 0)}",
+		f"Annual MRO Labour Charge: {_format_currency(cs, mro['annual_charge'] * display_factor, 0)}",
+	]
+	for yr_data in mro["per_year"]:
+		mro_lines.append(
+			f"Year {yr_data['year']} ({yr_data['period']}): "
+			f"Total={yr_data['total']}  LAE={yr_data['lae']}  "
+			f"Mechs={yr_data['mechanics']}  QC={yr_data['qc']}  "
+			f"Parts={yr_data['parts']}  Util={yr_data['util_pct']:.1f}%  "
+			f"Charge={_format_currency(cs, yr_data['charge'] * display_factor, 0)}"
+		)
+	sections.append(("MRO Manpower Planning", mro_lines))
+
 	return sections
 
 
-@st.cache_data(show_spinner=False)
 def _build_pdf_report(values):
 	from reportlab.lib.pagesizes import A4
 	from reportlab.lib.utils import ImageReader, simpleSplit
@@ -706,6 +1010,7 @@ def _build_pdf_report(values):
 	margin = 40
 	logo_path = os.path.join("ui", "acehawk_logo.png")
 	timestamp = pd.Timestamp.now().strftime("%d/%m/%Y %H:%M:%S")
+	scenario_name = str(values.get("scenario_name", "") or "")
 
 	def draw_page_header():
 		if os.path.exists(logo_path):
@@ -714,6 +1019,9 @@ def _build_pdf_report(values):
 		pdf.drawString(margin + 100, page_height - 52, "COMMERCIAL-IN-CONFIDENCE")
 		pdf.setFont("Helvetica-Bold", 16)
 		pdf.drawString(margin, page_height - 90, "AceHawk UH-60 Maintenance Report")
+		if scenario_name:
+			pdf.setFont("Helvetica-Oblique", 10)
+			pdf.drawString(margin, page_height - 106, f"Scenario: {scenario_name}")
 		pdf.setFont("Helvetica", 9)
 		pdf.drawRightString(page_width - margin, page_height - 30, f"Generated: {timestamp}")
 		pdf.setFont("Helvetica-Oblique", 9)
@@ -729,6 +1037,8 @@ def _build_pdf_report(values):
 	sections = _build_report_sections(values)
 	maintenance_schedule_fig = _build_maintenance_schedule_figure(values)
 	maintenance_timeline_fig = _build_maintenance_timeline_figure(values)
+	costings_fh_cost_fig = _build_costings_fh_cost_figure(values)
+	overheads_fh_cost_fig = _build_overheads_fh_cost_figure(values)
 	draw_page_header()
 	y = page_height - 120
 
@@ -750,8 +1060,89 @@ def _build_pdf_report(values):
 		pdf.drawImage(img_reader, margin, current_y - chart_height, width=chart_width, height=chart_height, preserveAspectRatio=True, mask='auto')
 		return current_y - chart_height - 10
 
+	def draw_mro_table_in_pdf(mro_data, current_y):
+		from reportlab.platypus import Table, TableStyle
+		from reportlab.lib import colors as rl_colors
+		cs_sym = values.get("currency_symbol", "$")
+		display_factor = _display_conversion_factor(values)
+		lc = float(values.get("labour_cost", 0.0)) * display_factor
+		lr = float(values.get("labour_rate", 0.0)) * display_factor
+		cm = 1.0 + float(values.get("geographic_contingency_pct", 0.0)) / 100.0
+		pph = mro_data["mp_productive_hrs"]
+
+		def _role_row(role, count):
+			h = count * pph
+			return [role, str(count), f"{h:,}", f"{cs_sym}{count * pph * lc:,.0f}", f"{cs_sym}{count * pph * lr * cm:,.0f}"]
+
+		rows = [
+			["Role", "Headcount", "Ann. Hrs", "Staff Cost", "MRO Charge"],
+			_role_row("Licensed Aircraft Engineer (LAE)", mro_data["lae_count"]),
+			_role_row("Aircraft Mechanic", mro_data["mechanic_count"]),
+			_role_row("QC / Quality Assurance Inspector", mro_data["qc_count"]),
+			_role_row("Parts / Logistics Coordinator", mro_data["parts_count"]),
+		]
+		if mro_data["planning_count"]:
+			rows.append(_role_row("Planning & Engineering Officer", mro_data["planning_count"]))
+		rows.append(["TOTAL", str(mro_data["total_staff"]),
+		             f"{mro_data['total_staff'] * pph:,}",
+		             f"{cs_sym}{(mro_data['annual_staff_cost'] * display_factor):,.0f}",
+		             f"{cs_sym}{(mro_data['annual_charge'] * display_factor):,.0f}"])
+		col_widths = [175, 50, 65, 70, 70]
+		tbl = Table(rows, colWidths=col_widths)
+		tbl.setStyle(TableStyle([
+			("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor("#1a4b7c")),
+			("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white),
+			("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+			("FONTSIZE", (0, 0), (-1, -1), 8),
+			("BACKGROUND", (0, -1), (-1, -1), rl_colors.HexColor("#dce8f5")),
+			("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+			("GRID", (0, 0), (-1, -1), 0.5, rl_colors.HexColor("#aaaaaa")),
+			("ROWBACKGROUNDS", (0, 1), (-1, -2), [rl_colors.white, rl_colors.HexColor("#f2f6fb")]),
+			("TOPPADDING", (0, 0), (-1, -1), 3),
+			("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+			("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+		]))
+		tw, th = tbl.wrapOn(pdf, page_width - 2 * margin, page_height)
+		current_y = ensure_space(current_y, th + 20)
+		pdf.setFont("Helvetica-Bold", 10)
+		pdf.drawString(margin, current_y, "Annual Average Staffing Summary")
+		current_y -= 14
+		tbl.drawOn(pdf, margin, current_y - th)
+		current_y -= th + 16
+
+		if mro_data["per_year"]:
+			yr_rows = [["Year", "Period", "Maint. Hrs", "LAE", "Mechs", "QC", "Parts", "Total", "Util %", "MRO Charge"]]
+			for yr in mro_data["per_year"]:
+				yr_rows.append([
+					str(yr["year"]), yr["period"], f"{yr['mh']:,.0f}",
+					str(yr["lae"]), str(yr["mechanics"]), str(yr["qc"]), str(yr["parts"]),
+					str(yr["total"]), f"{yr['util_pct']:.1f}%", f"{cs_sym}{(yr['charge'] * display_factor):,.0f}",
+				])
+			yr_col_widths = [28, 100, 55, 25, 28, 25, 28, 28, 35, 68]
+			yr_tbl = Table(yr_rows, colWidths=yr_col_widths)
+			yr_tbl.setStyle(TableStyle([
+				("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor("#1a4b7c")),
+				("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white),
+				("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+				("FONTSIZE", (0, 0), (-1, -1), 8),
+				("GRID", (0, 0), (-1, -1), 0.5, rl_colors.HexColor("#aaaaaa")),
+				("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor("#f2f6fb")]),
+				("TOPPADDING", (0, 0), (-1, -1), 3),
+				("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+				("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+			]))
+			yt_w, yt_h = yr_tbl.wrapOn(pdf, page_width - 2 * margin, page_height)
+			current_y = ensure_space(current_y, yt_h + 20)
+			pdf.setFont("Helvetica-Bold", 10)
+			pdf.drawString(margin, current_y, "Staffing Requirement by Contract Year")
+			current_y -= 14
+			yr_tbl.drawOn(pdf, margin, current_y - yt_h)
+			current_y -= yt_h + 10
+		return current_y
+
+	mro_staffing_for_pdf = _compute_mro_staffing(values)
 	for section_title, section_lines in sections:
-		if section_title == "Costings":
+		if section_title in ("Costings", "MRO Manpower Planning"):
 			pdf.showPage()
 			draw_page_header()
 			y = page_height - 120
@@ -770,6 +1161,12 @@ def _build_pdf_report(values):
 			y -= 4
 			y = draw_chart_in_pdf(maintenance_schedule_fig, y)
 			y = draw_chart_in_pdf(maintenance_timeline_fig, y)
+		if section_title == "Costings":
+			y -= 4
+			y = draw_chart_in_pdf(costings_fh_cost_fig, y)
+			y = draw_chart_in_pdf(overheads_fh_cost_fig, y)
+		if section_title == "MRO Manpower Planning":
+			y = draw_mro_table_in_pdf(mro_staffing_for_pdf, y)
 		y -= 8
 
 	pdf.save()
@@ -783,8 +1180,26 @@ def _build_pdf_report(values):
 
 def _render_print_report_actions(values):
 	st.subheader("Print Report")
+	# Augment values with scenario name and MRO staffing params from current session state
+	report_values = dict(values)
+	report_values["scenario_name"] = st.session_state.get(
+		"scenario_last_loaded", st.session_state.get("scenario_name_input", "N/A")
+	)
+	report_values["mp_productive_hrs"] = int(st.session_state.get("mp_productive_hrs", 1500))
+	report_values["mp_engineer_ratio"] = int(st.session_state.get("mp_engineer_ratio", 3))
+	report_values["mp_qc_ratio"] = int(st.session_state.get("mp_qc_ratio", 8))
+	report_values["mp_parts_ratio"] = int(st.session_state.get("mp_parts_ratio", 4))
+	report_values["mp_include_planning"] = bool(st.session_state.get("mp_include_planning", True))
+	report_values["mp_shift_coverage"] = str(st.session_state.get("mp_shift_coverage", "Single shift (1×)"))
+	for _, overhead_key in _mro_overhead_categories():
+		report_values[overhead_key] = float(st.session_state.get(overhead_key, 0.0))
+	# Force a fresh costing pass for the PDF so report values never come from stale cache entries.
 	try:
-		report_pdf, report_filename, email_subject, email_body = _build_pdf_report(values)
+		_build_costings_dataframe.clear()
+	except Exception:
+		pass
+	try:
+		report_pdf, report_filename, email_subject, email_body = _build_pdf_report(report_values)
 	except ModuleNotFoundError:
 		st.warning("PDF reporting is unavailable because the ReportLab package is not installed in the Python environment used by Streamlit.")
 		st.info("Install it in the interpreter running the app with: .venv\\Scripts\\python.exe -m pip install reportlab")
@@ -808,13 +1223,54 @@ def _render_print_report_actions(values):
 		)
 	components.html(
 		f"""
-		<div style=\"margin-top: 0.5rem;\"> 
-		  <button onclick=\"const w = window.open('data:application/pdf;base64,{pdf_b64}', '_blank'); if (w) {{ setTimeout(() => w.print(), 800); }}\" style=\"background:#0f766e;color:white;border:none;border-radius:0.5rem;padding:0.6rem 1rem;cursor:pointer;\">Print PDF Report</button>
+		<div style=\"margin-top: 0.5rem;\">
+		  <button onclick=\"printPdfReport()\" style=\"background:#0f766e;color:white;border:none;border-radius:0.5rem;padding:0.6rem 1rem;cursor:pointer;\">Print PDF Report</button>
 		</div>
+		<script>
+		  const pdfBase64 = "{pdf_b64}";
+
+		  function base64ToBlob(base64, mimeType) {{
+		    const binary = atob(base64);
+		    const bytes = new Uint8Array(binary.length);
+		    for (let i = 0; i < binary.length; i += 1) {{
+		      bytes[i] = binary.charCodeAt(i);
+		    }}
+		    return new Blob([bytes], {{ type: mimeType }});
+		  }}
+
+		  function printPdfReport() {{
+		    try {{
+		      const pdfBlob = base64ToBlob(pdfBase64, "application/pdf");
+		      const pdfUrl = URL.createObjectURL(pdfBlob);
+		      const printWindow = window.open(pdfUrl, "_blank");
+		      if (!printWindow) {{
+		        alert("Pop-up blocked. Please allow pop-ups for this app or use Download PDF Report.");
+		        URL.revokeObjectURL(pdfUrl);
+		        return;
+		      }}
+		      try {{
+		        printWindow.focus();
+		      }} catch (error) {{
+		        console.error("Failed to focus PDF window", error);
+		      }}
+
+		      setTimeout(function() {{
+		        try {{
+		          URL.revokeObjectURL(pdfUrl);
+		        }} catch (error) {{
+		          console.error("Failed to revoke PDF object URL", error);
+		        }}
+		      }}, 60000);
+		    }} catch (error) {{
+		      console.error("PDF print failed", error);
+		      alert("Unable to print the PDF directly. Please use Download PDF Report and print the file locally.");
+		    }}
+		  }}
+		</script>
 		""",
 		height=60,
 	)
-	st.caption("The PDF includes the AceHawk logo, timestamp, and sections covering all tabs. Use the email draft button to open your mail client, then attach the downloaded PDF.")
+	st.caption("The PDF includes the AceHawk logo, timestamp, and sections covering all tabs. Print PDF Report opens the full multi-page document in your browser's PDF viewer for printing.")
 
 # Dashboard metrics function
 def show_dashboard(values):
@@ -838,6 +1294,7 @@ def show_dashboard(values):
 		contract_fleet_hours += values["years"] * values["annual_hours_per_ac"]
 
 	# Compute cost metrics directly from annual costings engine so dashboard matches costings tab.
+	display_factor = _display_conversion_factor(values)
 	try:
 		costings_df = _build_costings_dataframe(values, apply_escalation=True)
 		_contract_fh_total = float(costings_df["Total FH"].sum())
@@ -864,11 +1321,11 @@ def show_dashboard(values):
 	with col4:
 		st.metric("Contract Fleet Hours", f"{int(contract_fleet_hours)}")
 	with col5:
-		st.metric("Contract Cost / FH", f"{values['currency_symbol']}{_cost_per_fh:,.0f}")
+		st.metric("Contract Cost / FH", f"{values['currency_symbol']}{(_cost_per_fh * display_factor):,.0f}")
 	with col6:
-		st.metric("Average Annual Cost", f"{values['currency_symbol']}{_avg_annual_cost:,.0f}")
+		st.metric("Average Annual Cost", f"{values['currency_symbol']}{(_avg_annual_cost * display_factor):,.0f}")
 	with col7:
-		st.metric("Total Contract Cost", f"{values['currency_symbol']}{_contract_total_cost:,.0f}")
+		st.metric("Total Contract Cost", f"{values['currency_symbol']}{(_contract_total_cost * display_factor):,.0f}")
 		st.caption(esc_note)
 
 	# Scheduled Downtime calculation (match Maintenance Schedule Fleet Forecast Downtime)
@@ -969,7 +1426,17 @@ def show_dashboard(values):
 
 	_render_print_report_actions(values)
 
+
+def _refresh_startup_caches_once():
+	if not st.session_state.get("startup_cache_refreshed", False):
+		try:
+			_build_costings_dataframe.clear()
+		except Exception:
+			pass
+		st.session_state["startup_cache_refreshed"] = True
+
 # Show dashboard ONCE at the top
+_refresh_startup_caches_once()
 show_dashboard(sidebar_values)
 
 # Navigation tabs
@@ -1636,50 +2103,564 @@ for i, tab in enumerate(selected_tab):
 		elif tabs[i] == "Costings":
 			st.header("Costings")
 			apply_escalation = st.toggle("Apply Annual Escalation", value=True, key="costings_escalation_toggle")
-			costings_df = _build_costings_dataframe(sidebar_values, apply_escalation=apply_escalation)
+			st.markdown("### MRO Operating Costs (Annual)")
+			st.caption(
+				"Add fixed annual costs to run the MRO capability. These are included in annual and contract totals. "
+				"Escalation and geographic contingency are applied in the same way as other customer-facing costs."
+			)
+			with st.expander("Operating Cost Inputs", expanded=True):
+				preset_profiles = {
+					"Custom": None,
+					"Lean MRO": {
+						"mro_cost_insurance": {"fixed": 30000.0, "per_ac": 2500.0},
+						"mro_cost_facility": {"fixed": 120000.0, "per_ac": 5000.0},
+						"mro_cost_gse": {"fixed": 20000.0, "per_ac": 2100.0},
+						"mro_cost_tooling": {"fixed": 40000.0, "per_ac": 2500.0},
+						"mro_cost_engine_bay": {"fixed": 25000.0, "per_ac": 2500.0},
+						"mro_cost_rotables_store": {"fixed": 12000.0, "per_ac": 1500.0},
+						"mro_cost_parts_store": {"fixed": 16000.0, "per_ac": 2000.0},
+						"mro_cost_utilities": {"fixed": 20000.0, "per_ac": 2500.0},
+						"mro_cost_it_quality": {"fixed": 18000.0, "per_ac": 2250.0},
+					},
+					"Standard MRO": {
+						"mro_cost_insurance": {"fixed": 50000.0, "per_ac": 3333.0},
+						"mro_cost_facility": {"fixed": 180000.0, "per_ac": 11667.0},
+						"mro_cost_gse": {"fixed": 35000.0, "per_ac": 4167.0},
+						"mro_cost_tooling": {"fixed": 80000.0, "per_ac": 5000.0},
+						"mro_cost_engine_bay": {"fixed": 60000.0, "per_ac": 5000.0},
+						"mro_cost_rotables_store": {"fixed": 30000.0, "per_ac": 3750.0},
+						"mro_cost_parts_store": {"fixed": 35000.0, "per_ac": 5000.0},
+						"mro_cost_utilities": {"fixed": 40000.0, "per_ac": 5000.0},
+						"mro_cost_it_quality": {"fixed": 38000.0, "per_ac": 3500.0},
+					},
+					"Full Capability MRO": {
+						"mro_cost_insurance": {"fixed": 70000.0, "per_ac": 5000.0},
+						"mro_cost_facility": {"fixed": 260000.0, "per_ac": 20000.0},
+						"mro_cost_gse": {"fixed": 60000.0, "per_ac": 7500.0},
+						"mro_cost_tooling": {"fixed": 140000.0, "per_ac": 10000.0},
+						"mro_cost_engine_bay": {"fixed": 110000.0, "per_ac": 10000.0},
+						"mro_cost_rotables_store": {"fixed": 65000.0, "per_ac": 6666.0},
+						"mro_cost_parts_store": {"fixed": 80000.0, "per_ac": 8333.0},
+						"mro_cost_utilities": {"fixed": 70000.0, "per_ac": 8333.0},
+						"mro_cost_it_quality": {"fixed": 70000.0, "per_ac": 5833.0},
+					},
+				}
+				preset_col1, preset_col2 = st.columns([3, 1])
+				with preset_col1:
+					selected_preset = st.selectbox(
+						"Overhead preset",
+						list(preset_profiles.keys()),
+						index=0,
+						key="mro_overhead_preset_select",
+						help="Choose a baseline profile and click Load Preset to populate all annual overhead fields.",
+					)
+					scale_preset_with_fleet = st.toggle(
+						"Scale preset with fleet size",
+						value=True,
+						key="mro_overhead_preset_scale_toggle",
+						help="If enabled, each category uses Fixed + (Per-Aircraft x Fleet Size).",
+					)
+				with preset_col2:
+					st.write("")
+					st.write("")
+					if st.button("Load Preset", key="load_mro_overhead_preset"):
+						selected_values = preset_profiles.get(selected_preset)
+						if selected_values:
+							for preset_key, components in selected_values.items():
+								fixed_component = float(components.get("fixed", 0.0))
+								per_ac_component = float(components.get("per_ac", 0.0))
+								if scale_preset_with_fleet:
+									preset_value = fixed_component + (per_ac_component * float(sidebar_values.get("fleet_size", 1)))
+								else:
+									reference_fleet = 12.0
+									preset_value = fixed_component + (per_ac_component * reference_fleet)
+								st.session_state[preset_key] = float(preset_value)
+							st.success(f"Loaded preset: {selected_preset}")
+							st.rerun()
+				preset_values = preset_profiles.get(selected_preset)
+				if preset_values:
+					if scale_preset_with_fleet:
+						preview_total = sum(
+							float(v.get("fixed", 0.0)) + (float(v.get("per_ac", 0.0)) * float(sidebar_values.get("fleet_size", 1)))
+							for v in preset_values.values()
+						)
+						preview_basis = f"fleet size {int(sidebar_values.get('fleet_size', 1))}"
+					else:
+						reference_fleet = 12.0
+						preview_total = sum(
+							float(v.get("fixed", 0.0)) + (float(v.get("per_ac", 0.0)) * reference_fleet)
+							for v in preset_values.values()
+						)
+						preview_basis = "reference fleet size 12"
+					display_factor_for_preview = _display_conversion_factor(sidebar_values)
+					st.caption(
+						f"Preset annual overhead total ({preview_basis}): "
+							f"{sidebar_values['currency_symbol']}{(preview_total * display_factor_for_preview):,.0f} "
+						"(before escalation and contingency)."
+					)
+
+				o1, o2, o3 = st.columns(3)
+				with o1:
+					mro_cost_insurance = st.number_input(
+						"Insurance (USD/year)",
+						min_value=0.0,
+						value=float(st.session_state.get("mro_cost_insurance", 0.0)),
+						step=1000.0,
+						key="mro_cost_insurance",
+					)
+					mro_cost_facility = st.number_input(
+						"Facility Costs (USD/year)",
+						min_value=0.0,
+						value=float(st.session_state.get("mro_cost_facility", 0.0)),
+						step=1000.0,
+						key="mro_cost_facility",
+					)
+					mro_cost_gse = st.number_input(
+						"GSE (USD/year)",
+						min_value=0.0,
+						value=float(st.session_state.get("mro_cost_gse", 0.0)),
+						step=1000.0,
+						key="mro_cost_gse",
+					)
+				with o2:
+					mro_cost_tooling = st.number_input(
+						"UH-60 Specialist Tooling (USD/year)",
+						min_value=0.0,
+						value=float(st.session_state.get("mro_cost_tooling", 0.0)),
+						step=1000.0,
+						key="mro_cost_tooling",
+					)
+					mro_cost_engine_bay = st.number_input(
+						"Engine Bay (USD/year)",
+						min_value=0.0,
+						value=float(st.session_state.get("mro_cost_engine_bay", 0.0)),
+						step=1000.0,
+						key="mro_cost_engine_bay",
+					)
+					mro_cost_rotables_store = st.number_input(
+						"Rotables Store (USD/year)",
+						min_value=0.0,
+						value=float(st.session_state.get("mro_cost_rotables_store", 0.0)),
+						step=1000.0,
+						key="mro_cost_rotables_store",
+					)
+				with o3:
+					mro_cost_parts_store = st.number_input(
+						"Parts Store (USD/year)",
+						min_value=0.0,
+						value=float(st.session_state.get("mro_cost_parts_store", 0.0)),
+						step=1000.0,
+						key="mro_cost_parts_store",
+					)
+					mro_cost_utilities = st.number_input(
+						"Utilities (USD/year)",
+						min_value=0.0,
+						value=float(st.session_state.get("mro_cost_utilities", 0.0)),
+						step=1000.0,
+						key="mro_cost_utilities",
+					)
+					mro_cost_it_quality = st.number_input(
+						"IT/Quality/Compliance (USD/year)",
+						min_value=0.0,
+						value=float(st.session_state.get("mro_cost_it_quality", 0.0)),
+						step=1000.0,
+						key="mro_cost_it_quality",
+					)
+
+			costings_inputs = dict(sidebar_values)
+			costings_inputs.update({
+				"mro_cost_insurance": mro_cost_insurance,
+				"mro_cost_facility": mro_cost_facility,
+				"mro_cost_gse": mro_cost_gse,
+				"mro_cost_tooling": mro_cost_tooling,
+				"mro_cost_engine_bay": mro_cost_engine_bay,
+				"mro_cost_rotables_store": mro_cost_rotables_store,
+				"mro_cost_parts_store": mro_cost_parts_store,
+				"mro_cost_utilities": mro_cost_utilities,
+				"mro_cost_it_quality": mro_cost_it_quality,
+			})
+
+			costings_df = _build_costings_dataframe(costings_inputs, apply_escalation=apply_escalation)
+			display_factor = _display_conversion_factor(sidebar_values)
 			n_years = int(sidebar_values["years"])
 			annual_hours = float(sidebar_values["annual_hours_per_ac"])
 			fleet_size = int(sidebar_values["fleet_size"])
 			contingency_multiplier = float(sidebar_values.get("geographic_contingency_multiplier", 1.0))
-			annual_management_fee = float(sidebar_values.get("annual_management_fee_per_ac", 0.0)) * fleet_size * contingency_multiplier
+			annual_management_fee = float(sidebar_values.get("annual_management_fee_per_ac", 0.0)) * fleet_size
 			labour_rate = float(sidebar_values.get("labour_rate", 0.0))
+			overhead_categories = [label for label, _ in _mro_overhead_categories()]
+			cost_columns = [
+				"Manpower Cost",
+				"Parts Cost",
+				"Management Fee",
+				"MRO Overheads",
+				"Total Cost",
+			] + [c for c in overhead_categories if c in costings_df.columns]
+			annual_costings_display_df = costings_df.copy()
+			currency_cols_in_display = [col for col in cost_columns if col in annual_costings_display_df.columns]
+			if currency_cols_in_display:
+				annual_costings_display_df[currency_cols_in_display] = annual_costings_display_df[currency_cols_in_display] * display_factor
+			numeric_cols = annual_costings_display_df.select_dtypes(include=["number"]).columns.tolist()
+			contract_fh_total_for_table = float(costings_df["Total FH"].sum()) if "Total FH" in costings_df.columns else 0.0
+			if contract_fh_total_for_table > 0:
+				fh_cost_row = {
+					"Contract Year": float("nan"),
+					"Period": "FH Cost",
+				}
+				for col in numeric_cols:
+					if col == "Contract Year":
+						continue
+					fh_cost_row[col] = float(costings_df[col].sum()) / contract_fh_total_for_table
+				annual_costings_display_df = pd.concat([annual_costings_display_df, pd.DataFrame([fh_cost_row])], ignore_index=True)
+			if numeric_cols:
+				annual_costings_display_df[numeric_cols] = annual_costings_display_df[numeric_cols].round(0)
 			st.markdown("### Annual Costings by Contract Year")
+			st.caption("USD calculation base; values shown in selected display currency using current FX rate.")
 			st.dataframe(
-				costings_df.style.format({
-					"Total FH": "{:.1f}",
-					"Manpower Hrs": "{:.1f}",
-					"Manpower Cost": f"{sidebar_values['currency_symbol']}{{:,.0f}}",
-					"Parts Cost": f"{sidebar_values['currency_symbol']}{{:,.0f}}",
-					"Management Fee": f"{sidebar_values['currency_symbol']}{{:,.0f}}",
-					"Total Cost": f"{sidebar_values['currency_symbol']}{{:,.0f}}",
-				})
+				annual_costings_display_df.style.format({
+					**{col: "{:.0f}" for col in ["Contract Year", "Total FH", "Manpower Hrs"] if col in annual_costings_display_df.columns},
+					**{col: f"{sidebar_values['currency_symbol']}{{:,.0f}}" for col in cost_columns if col in annual_costings_display_df.columns},
+				}, na_rep="")
 			)
+			if contract_fh_total_for_table > 0:
+				component_items = ["Manpower Cost", "Parts Cost", "Management Fee", "MRO Overheads"]
+				present_components = [item for item in component_items if item in costings_df.columns]
+				if present_components:
+					component_values = [
+						(float(costings_df[item].sum()) / contract_fh_total_for_table) * display_factor
+						for item in present_components
+					]
+					line_x = present_components + ["Total Cost"]
+					line_y = []
+					running_total = 0.0
+					for val in component_values:
+						running_total += val
+						line_y.append(running_total)
+					line_y.append(running_total)
+
+					st.markdown("#### Annual Costings by Contract Year: FH Cost by Costing Item")
+					fh_fig = go.Figure()
+					fh_fig.add_trace(go.Bar(
+						x=present_components,
+						y=component_values,
+						name="Cost Components",
+						text=[f"{sidebar_values['currency_symbol']}{v:,.0f}" for v in component_values],
+						textposition="outside",
+					))
+					fh_fig.add_trace(go.Scatter(
+						x=line_x,
+						y=line_y,
+						mode="lines+markers+text",
+						name="Total Cost (Cumulative)",
+						line={"width": 3},
+						text=[f"{sidebar_values['currency_symbol']}{v:,.0f}" for v in line_y],
+						textposition="top center",
+					))
+					fh_fig.update_layout(
+						yaxis_tickformat=",.0f",
+						xaxis_title="Costing Item",
+						yaxis_title=f"FH Cost ({sidebar_values['currency_symbol']})",
+					)
+					st.plotly_chart(
+						fh_fig,
+						use_container_width=True,
+						config=_plotly_export_config("annual_costings_fh_cost_by_item"),
+					)
+			overhead_cols_present = [c for c in overhead_categories if c in costings_df.columns]
+			if overhead_cols_present:
+				st.markdown("#### Annual MRO Overheads Breakdown")
+				st.caption("USD calculation base; values shown in selected display currency using current FX rate.")
+				overhead_breakdown_df = costings_df[["Contract Year", "Period"] + overhead_cols_present + ["MRO Overheads"]]
+				overhead_breakdown_df[overhead_cols_present + ["MRO Overheads"]] = overhead_breakdown_df[overhead_cols_present + ["MRO Overheads"]] * display_factor
+				st.dataframe(
+					overhead_breakdown_df.style.format({
+						col: f"{sidebar_values['currency_symbol']}{{:,.0f}}"
+						for col in overhead_cols_present + ["MRO Overheads"]
+					}),
+					use_container_width=True,
+				)
+				if contract_fh_total_for_table > 0:
+					overhead_component_values = [
+						(float(costings_df[col].sum()) / contract_fh_total_for_table) * display_factor
+						for col in overhead_cols_present
+					]
+					overhead_line_x = overhead_cols_present + ["MRO Overheads"]
+					overhead_line_y = []
+					overhead_running_total = 0.0
+					for val in overhead_component_values:
+						overhead_running_total += val
+						overhead_line_y.append(overhead_running_total)
+					overhead_line_y.append(overhead_running_total)
+
+					st.markdown("##### FH Cost by Overhead Item (Cumulative Total Line)")
+					overhead_fig = go.Figure()
+					overhead_fig.add_trace(go.Bar(
+						x=overhead_cols_present,
+						y=overhead_component_values,
+						name="Overhead Components",
+						text=[f"{sidebar_values['currency_symbol']}{v:,.0f}" for v in overhead_component_values],
+						textposition="outside",
+					))
+					overhead_fig.add_trace(go.Scatter(
+						x=overhead_line_x,
+						y=overhead_line_y,
+						mode="lines+markers+text",
+						name="MRO Overheads (Cumulative)",
+						line={"width": 3},
+						text=[f"{sidebar_values['currency_symbol']}{v:,.0f}" for v in overhead_line_y],
+						textposition="top center",
+					))
+					overhead_fig.update_layout(
+						yaxis_tickformat=",.0f",
+						xaxis_title="Overhead Item",
+						yaxis_title=f"FH Cost ({sidebar_values['currency_symbol']})",
+					)
+					st.plotly_chart(
+						overhead_fig,
+						use_container_width=True,
+						config=_plotly_export_config("annual_mro_overheads_fh_cost_by_item"),
+					)
 
 			c1, c2, c3, c4 = st.columns(4)
 			contract_fh_total = costings_df["Total FH"].sum()
 			contract_manpower_hours_total = costings_df["Manpower Hrs"].sum()
 			manpower_cost_per_fh = (costings_df["Manpower Cost"].sum() / contract_fh_total) if contract_fh_total > 0 else 0.0
 			parts_cost_per_fh = (costings_df["Parts Cost"].sum() / contract_fh_total) if contract_fh_total > 0 else 0.0
-			contract_management_fee = annual_management_fee * n_years
-			management_fee_per_fh = (annual_management_fee / (annual_hours * fleet_size)) if (annual_hours * fleet_size) > 0 else 0.0
+			overheads_cost_per_fh = (costings_df["MRO Overheads"].sum() / contract_fh_total) if contract_fh_total > 0 else 0.0
+			contract_management_fee = float(costings_df["Management Fee"].sum()) if "Management Fee" in costings_df.columns else (annual_management_fee * n_years)
+			annual_management_fee = (contract_management_fee / n_years) if n_years > 0 else 0.0
+			management_fee_per_fh = (contract_management_fee / contract_fh_total) if contract_fh_total > 0 else 0.0
+			contract_overheads = float(costings_df["MRO Overheads"].sum())
+			annual_overheads = contract_overheads / n_years if n_years > 0 else 0.0
 			labour_cost = float(sidebar_values.get("labour_cost", 0.0))
 			contract_manpower_cost_delta = (labour_rate - labour_cost) * contract_manpower_hours_total * contingency_multiplier
 			manpower_delta_per_fh = (((labour_rate - labour_cost) * contract_manpower_hours_total * contingency_multiplier) / contract_fh_total) if contract_fh_total > 0 else 0.0
 			with c1:
-				st.metric("Contract FH", f"{costings_df['Total FH'].sum():.1f}")
-				st.metric("Contract Management Fee", f"{sidebar_values['currency_symbol']}{contract_management_fee:,.0f}")
-				st.metric("Annual Management Fee", f"{sidebar_values['currency_symbol']}{annual_management_fee:,.0f}")
-				st.metric("Management Fee / FH", f"{sidebar_values['currency_symbol']}{management_fee_per_fh:,.2f}")
+				st.metric("Contract FH", f"{costings_df['Total FH'].sum():.0f}")
+				st.metric("Contract Management Fee", f"{sidebar_values['currency_symbol']}{(contract_management_fee * display_factor):,.0f}")
+				st.metric("Annual Management Fee", f"{sidebar_values['currency_symbol']}{(annual_management_fee * display_factor):,.0f}")
+				st.metric("Management Fee / FH", f"{sidebar_values['currency_symbol']}{(management_fee_per_fh * display_factor):,.0f}")
 			with c2:
-				st.metric("Contract Manpower Hrs", f"{costings_df['Manpower Hrs'].sum():.1f}")
+				st.metric("Contract Manpower Hrs", f"{costings_df['Manpower Hrs'].sum():.0f}")
 			with c3:
-				st.metric("Contract Manpower Cost", f"{sidebar_values['currency_symbol']}{costings_df['Manpower Cost'].sum():,.0f}")
-				st.metric("Contract Manpower Cost Delta", f"{sidebar_values['currency_symbol']}{contract_manpower_cost_delta:,.0f}")
-				st.metric("Manpower Cost / FH", f"{sidebar_values['currency_symbol']}{manpower_cost_per_fh:,.2f}")
-				st.metric("Manpower Delta /FH", f"{sidebar_values['currency_symbol']}{manpower_delta_per_fh:,.2f}")
+				st.metric("Contract Manpower Cost", f"{sidebar_values['currency_symbol']}{(costings_df['Manpower Cost'].sum() * display_factor):,.0f}")
+				st.metric("Contract Manpower Cost Delta", f"{sidebar_values['currency_symbol']}{(contract_manpower_cost_delta * display_factor):,.0f}")
+				st.metric("Manpower Cost / FH", f"{sidebar_values['currency_symbol']}{(manpower_cost_per_fh * display_factor):,.0f}")
+				st.metric("Manpower Delta /FH", f"{sidebar_values['currency_symbol']}{(manpower_delta_per_fh * display_factor):,.0f}")
 			with c4:
-				st.metric("Contract Parts Cost", f"{sidebar_values['currency_symbol']}{costings_df['Parts Cost'].sum():,.0f}")
-				st.metric("Parts Cost /FH", f"{sidebar_values['currency_symbol']}{parts_cost_per_fh:,.2f}")
+				st.metric("Contract Parts Cost", f"{sidebar_values['currency_symbol']}{(costings_df['Parts Cost'].sum() * display_factor):,.0f}")
+				st.metric("Parts Cost /FH", f"{sidebar_values['currency_symbol']}{(parts_cost_per_fh * display_factor):,.0f}")
+				st.metric("Contract MRO Overheads", f"{sidebar_values['currency_symbol']}{(contract_overheads * display_factor):,.0f}")
+				st.metric("Annual MRO Overheads", f"{sidebar_values['currency_symbol']}{(annual_overheads * display_factor):,.0f}")
+				st.metric("MRO Overheads /FH", f"{sidebar_values['currency_symbol']}{(overheads_cost_per_fh * display_factor):,.0f}")
+
+			# ----------------------------------------------------------------
+			# MRO Manpower Planning & Staffing Estimate
+			# ----------------------------------------------------------------
+			st.markdown("---")
+			st.markdown("### MRO Manpower Planning & Staffing Estimate")
+			st.caption(
+				"Derives the number of engineers, mechanics, QC inspectors and support staff "
+				"required to sustain MRO operations for the modelled fleet, annual flying rate and contract length."
+			)
+
+			with st.expander("Staffing Assumptions", expanded=True):
+				mpc1, mpc2, mpc3 = st.columns(3)
+				with mpc1:
+					mp_productive_hrs = st.number_input(
+						"Productive hours per person per year",
+						min_value=500, max_value=2500, value=1500, step=50,
+						key="mp_productive_hrs",
+						help="Net annual working hours after annual leave, public holidays, training and sick days (typically 1,400–1,800 hrs).",
+					)
+					mp_engineer_ratio = st.number_input(
+						"Mechanics per Licensed Aircraft Engineer (LAE)",
+						min_value=1, max_value=10, value=3, step=1,
+						key="mp_engineer_ratio",
+						help="The number of aircraft mechanics supported/signed-off by one Licensed Aircraft Engineer.",
+					)
+				with mpc2:
+					mp_qc_ratio = st.number_input(
+						"Direct maintainers per QC/QA Inspector",
+						min_value=1, max_value=20, value=8, step=1,
+						key="mp_qc_ratio",
+						help="One Quality Control/Assurance Inspector for every N direct maintenance staff.",
+					)
+					mp_parts_ratio = st.number_input(
+						"Aircraft per Parts/Logistics Coordinator",
+						min_value=1, max_value=20, value=4, step=1,
+						key="mp_parts_ratio",
+						help="One supply-chain and parts coordinator per N aircraft in the fleet.",
+					)
+				with mpc3:
+					mp_include_planning = st.toggle(
+						"Include Planning & Engineering Officer",
+						value=True, key="mp_include_planning",
+						help="Adds one dedicated planning/production-control engineer to the MRO team.",
+					)
+					mp_shift_coverage = st.selectbox(
+						"Operational shift coverage",
+						["Single shift (1×)", "Double shift (2×)"],
+						key="mp_shift_coverage",
+						help="Double shift doubles the direct maintenance headcount to maintain continuous operations.",
+					)
+
+			shift_mult = 2.0 if mp_shift_coverage.startswith("Double") else 1.0
+			annual_avg_mh = (costings_df["Manpower Hrs"].sum() / n_years) if n_years > 0 else 0.0
+			cs = sidebar_values["currency_symbol"]
+			labour_cost_rate = float(sidebar_values.get("labour_cost", 0.0))
+
+			# Direct maintenance headcount (to deliver the modelled manpower hours)
+			direct_staff_raw = (annual_avg_mh / mp_productive_hrs * shift_mult) if mp_productive_hrs > 0 else 0.0
+			direct_staff = max(1, math.ceil(direct_staff_raw)) if annual_avg_mh > 0 else 0
+
+			# LAE / mechanic split: engineer_ratio mechanics per 1 LAE
+			lae_count = max(1, math.ceil(direct_staff / (mp_engineer_ratio + 1))) if direct_staff > 0 else 0
+			mechanic_count = max(0, direct_staff - lae_count)
+
+			# Support roles
+			qc_count = max(1, math.ceil(direct_staff / mp_qc_ratio)) if direct_staff > 0 else 1
+			parts_count = max(1, math.ceil(fleet_size / mp_parts_ratio))
+			planning_count = 1 if mp_include_planning else 0
+			total_staff = direct_staff + qc_count + parts_count + planning_count
+
+			# Utilisation of direct maintenance staff
+			annual_available_mh = total_staff * mp_productive_hrs
+			utilisation_pct = (
+				(annual_avg_mh / (direct_staff * mp_productive_hrs) * 100.0)
+				if direct_staff * mp_productive_hrs > 0 else 0.0
+			)
+
+			# Annual cost and charge
+			annual_staff_cost = total_staff * mp_productive_hrs * labour_cost_rate
+			annual_charge = total_staff * mp_productive_hrs * labour_rate * contingency_multiplier
+
+			# Staffing breakdown table
+			def _staffing_row(role, count):
+				return {
+					"Role": role,
+					"Headcount": count,
+					"Annual Hrs Available": count * mp_productive_hrs,
+					"Annual Staff Cost": count * mp_productive_hrs * labour_cost_rate,
+					"Annual MRO Charge": count * mp_productive_hrs * labour_rate * contingency_multiplier,
+				}
+
+			staffing_rows = [
+				_staffing_row("Licensed Aircraft Engineer (LAE)", lae_count),
+				_staffing_row("Aircraft Mechanic", mechanic_count),
+				_staffing_row("QC / Quality Assurance Inspector", qc_count),
+				_staffing_row("Parts / Logistics Coordinator", parts_count),
+			]
+			if planning_count:
+				staffing_rows.append(_staffing_row("Planning & Engineering Officer", planning_count))
+			staffing_rows.append({
+				"Role": "TOTAL",
+				"Headcount": total_staff,
+				"Annual Hrs Available": annual_available_mh,
+				"Annual Staff Cost": annual_staff_cost,
+				"Annual MRO Charge": annual_charge,
+			})
+			staffing_df = pd.DataFrame(staffing_rows)
+			if not staffing_df.empty:
+				staffing_df[["Annual Staff Cost", "Annual MRO Charge"]] = staffing_df[["Annual Staff Cost", "Annual MRO Charge"]] * display_factor
+
+			st.markdown("#### Estimated MRO Staffing (Annual Average)")
+			st.caption("USD calculation base; values shown in selected display currency using current FX rate.")
+			st.dataframe(
+				staffing_df.style.format({
+					"Headcount": "{:.0f}",
+					"Annual Hrs Available": "{:,.0f}",
+					"Annual Staff Cost": f"{cs}{{:,.0f}}",
+					"Annual MRO Charge": f"{cs}{{:,.0f}}",
+				}),
+				use_container_width=True,
+			)
+
+			# KPI metrics row
+			km1, km2, km3, km4, km5 = st.columns(5)
+			with km1:
+				st.metric("Total Headcount", f"{total_staff}")
+			with km2:
+				st.metric("Direct Maintenance Staff", f"{direct_staff}")
+			with km3:
+				st.metric(
+					"Direct Staff Utilisation",
+					f"{utilisation_pct:.0f}%",
+					help="Modelled maintenance hours ÷ total available direct staff hours.",
+				)
+			with km4:
+				st.metric("Annual Staff Cost", f"{cs}{(annual_staff_cost * display_factor):,.0f}")
+			with km5:
+				st.metric("Annual MRO Labour Charge", f"{cs}{(annual_charge * display_factor):,.0f}")
+
+			if utilisation_pct > 100.0:
+				st.warning(
+					f"Direct staff utilisation is {utilisation_pct:.0f}% — modelled maintenance hours exceed "
+					"available direct staff capacity. Consider increasing headcount or adding a second shift."
+				)
+			elif utilisation_pct > 85.0:
+				st.info(f"Direct staff utilisation is {utilisation_pct:.0f}% — operating near capacity.")
+
+			# Per-contract-year staffing table
+			st.markdown("#### Staffing Requirement by Contract Year")
+			st.caption("USD calculation base; values shown in selected display currency using current FX rate.")
+			year_staffing_rows = []
+			for _, yr_row in costings_df.iterrows():
+				yr_mh = float(yr_row["Manpower Hrs"])
+				yr_direct_raw = (yr_mh / mp_productive_hrs * shift_mult) if mp_productive_hrs > 0 else 0.0
+				yr_direct = max(1, math.ceil(yr_direct_raw)) if yr_mh > 0 else 0
+				yr_lae = max(1, math.ceil(yr_direct / (mp_engineer_ratio + 1))) if yr_direct > 0 else 0
+				yr_mech = max(0, yr_direct - yr_lae)
+				yr_qc = max(1, math.ceil(yr_direct / mp_qc_ratio)) if yr_direct > 0 else 1
+				yr_parts = max(1, math.ceil(fleet_size / mp_parts_ratio))
+				yr_planning = planning_count
+				yr_total = yr_direct + yr_qc + yr_parts + yr_planning
+				yr_util = (
+					(yr_mh / (yr_direct * mp_productive_hrs) * 100.0)
+					if yr_direct * mp_productive_hrs > 0 else 0.0
+				)
+				yr_staff_cost = yr_total * mp_productive_hrs * labour_cost_rate
+				yr_charge = yr_total * mp_productive_hrs * labour_rate * contingency_multiplier
+				year_staffing_rows.append({
+					"Contract Year": int(yr_row["Contract Year"]),
+					"Period": yr_row["Period"],
+					"Maint. Hrs": yr_mh,
+					"LAE": yr_lae,
+					"Mechanics": yr_mech,
+					"QC": yr_qc,
+					"Parts/Logs": yr_parts,
+					"Planning": yr_planning,
+					"Total Staff": yr_total,
+					"Utilisation %": round(yr_util, 1),
+					"Staff Cost": yr_staff_cost,
+					"MRO Labour Charge": yr_charge,
+				})
+
+			year_staffing_df = pd.DataFrame(year_staffing_rows)
+			if not year_staffing_df.empty:
+				year_staffing_df[["Staff Cost", "MRO Labour Charge"]] = year_staffing_df[["Staff Cost", "MRO Labour Charge"]] * display_factor
+			st.dataframe(
+				year_staffing_df.style.format({
+					"Maint. Hrs": "{:,.0f}",
+					"LAE": "{:.0f}",
+					"Mechanics": "{:.0f}",
+					"QC": "{:.0f}",
+					"Parts/Logs": "{:.0f}",
+					"Planning": "{:.0f}",
+					"Total Staff": "{:.0f}",
+					"Utilisation %": "{:.0f}",
+					"Staff Cost": f"{cs}{{:,.0f}}",
+					"MRO Labour Charge": f"{cs}{{:,.0f}}",
+				}),
+				use_container_width=True,
+			)
+			st.caption(
+				"**Staff Cost** uses the Labour Cost/hr input (internal employment cost). "
+				"**MRO Labour Charge** uses the Labour Rate/hr input with geographic contingency applied (customer-facing charge). "
+				"Direct headcount is derived from modelled maintenance hours ÷ productive hours per person. "
+				"QC, Parts/Logistics and Planning roles are additional to direct maintenance staff."
+			)
+
 		elif tabs[i] == "Event Library":
 			st.header("Event Library")
 			scheduled_path = os.path.join("data", "scheduled_events.csv")

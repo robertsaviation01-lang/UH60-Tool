@@ -1,6 +1,6 @@
 {
   "name": "Rheinmetall2",
-  "saved_at": "2026-03-26T12:43:24.070853",
+  "saved_at": "2026-04-06T12:36:15.997543",
   "currency": "USD",
   "use_live_fx": false,
   "fleet_size": 8,
@@ -14,6 +14,7 @@
   "labour_rate": 115.0,
   "labour_cost": 45.0,
   "mgmt_fee_usd": 10000.0,
+  "geographic_contingency_pct": 0.0,
   "hours_until_pmi": [
     480,
     480,
@@ -26,12 +27,21 @@
   ],
   "custom_ac_dates": [
     "2026-10-01",
-    "2026-10-01",
-    "2027-04-05",
-    "2027-04-05",
-    "2027-07-12",
-    "2027-07-12",
-    "2027-10-25",
-    "2027-10-25"
-  ]
+    "2027-01-01",
+    "2027-04-01",
+    "2027-07-01",
+    "2027-10-01",
+    "2028-01-01",
+    "2028-04-01",
+    "2028-07-01"
+  ],
+  "mro_cost_insurance": 0.0,
+  "mro_cost_facility": 0.0,
+  "mro_cost_gse": 0.0,
+  "mro_cost_tooling": 0.0,
+  "mro_cost_engine_bay": 0.0,
+  "mro_cost_rotables_store": 0.0,
+  "mro_cost_parts_store": 0.0,
+  "mro_cost_utilities": 0.0,
+  "mro_cost_it_quality": 0.0
 }

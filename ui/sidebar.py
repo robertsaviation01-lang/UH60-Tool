@@ -9,6 +9,19 @@ import re
 from pathlib import Path
 
 
+MRO_OVERHEAD_KEYS = [
+    "mro_cost_insurance",
+    "mro_cost_facility",
+    "mro_cost_gse",
+    "mro_cost_tooling",
+    "mro_cost_engine_bay",
+    "mro_cost_rotables_store",
+    "mro_cost_parts_store",
+    "mro_cost_utilities",
+    "mro_cost_it_quality",
+]
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_live_fx_rate(from_currency, to_currency):
     if from_currency == to_currency:
@@ -76,6 +89,8 @@ def _apply_loaded_scenario(data):
     st.session_state["labour_cost_input"] = float(data.get("labour_cost", 45.0))
     st.session_state["mgmt_fee_usd"] = float(data.get("mgmt_fee_usd", 10000.0))
     st.session_state["geographic_contingency_pct_input"] = float(data.get("geographic_contingency_pct", 0.0))
+    for overhead_key in MRO_OVERHEAD_KEYS:
+        st.session_state[overhead_key] = float(data.get(overhead_key, 0.0))
 
     loaded_hours = data.get("hours_until_pmi", [])
     loaded_dates = data.get("custom_ac_dates", [])
@@ -88,6 +103,7 @@ def _apply_loaded_scenario(data):
         st.session_state[f"ac_{i+1}_start_date"] = _parse_date(date_val, planning_start)
 
     st.session_state["scenario_last_loaded"] = str(data.get("name", "uploaded scenario"))
+    st.session_state["_skip_pmi_default_init_once"] = True
 
 
 def _collect_scenario_payload():
@@ -113,10 +129,49 @@ def _collect_scenario_payload():
     fleet_size = payload["fleet_size"]
     payload["hours_until_pmi"] = [int(st.session_state.get(f"ac_{i+1}_pmi", 480)) for i in range(fleet_size)]
     payload["custom_ac_dates"] = [str(st.session_state.get(f"ac_{i+1}_start_date", payload["planning_start_date"])) for i in range(fleet_size)]
+    for overhead_key in MRO_OVERHEAD_KEYS:
+        payload[overhead_key] = float(st.session_state.get(overhead_key, 0.0))
     return payload
+
+
+def _reset_sidebar_defaults():
+    today = pd.Timestamp.now().normalize().date()
+    st.session_state["currency_select"] = "USD"
+    st.session_state["use_live_fx_toggle"] = False
+    st.session_state["fleet_size_input"] = 1
+    st.session_state["annual_hours_input"] = 300
+    st.session_state["annual_escalation_input"] = 5.0
+    st.session_state["planning_start_date_input"] = today
+    st.session_state["use_custom_ac_dates_checkbox"] = False
+    st.session_state["planning_horizon_years"] = 3
+    st.session_state["mgmt_fee_usd"] = 10000.0
+    st.session_state["ac_1_pmi"] = 480
+    st.session_state["ac_1_start_date"] = today
+
+    # Reset any dynamically created aircraft-specific fields from prior larger fleets.
+    for key in list(st.session_state.keys()):
+        if re.match(r"^ac_\d+_pmi$", key) and key != "ac_1_pmi":
+            del st.session_state[key]
+        if re.match(r"^ac_\d+_start_date$", key) and key != "ac_1_start_date":
+            del st.session_state[key]
 
 def show_sidebar():
     st.sidebar.title("UH-60 – Assumptions")
+
+    pending_selection = st.session_state.pop("_pending_post_save_selection", None)
+    if pending_selection:
+        # Must be set before corresponding widgets are instantiated in this run.
+        st.session_state["scenario_name_input"] = pending_selection
+        st.session_state["saved_scenario_select"] = pending_selection
+
+    pending_save_success = st.session_state.pop("_pending_save_success", None)
+    if pending_save_success:
+        st.sidebar.success(f"Saved scenario: {pending_save_success}")
+
+    if st.sidebar.button("Reset to Defaults", use_container_width=True):
+        _reset_sidebar_defaults()
+        st.sidebar.success("Defaults restored.")
+        st.rerun()
 
     # Scenario manager
     scenarios_path = _scenario_folder()
@@ -151,15 +206,17 @@ def show_sidebar():
                 st.warning("Select a saved scenario first.")
     with col_save:
         if st.button("Save", key="save_named_scenario"):
-            scenario_name = _sanitize_scenario_name(st.session_state.get("scenario_name_input", ""))
-            if not scenario_name:
+            typed_name = _sanitize_scenario_name(st.session_state.get("scenario_name_input", ""))
+            target_scenario = typed_name if typed_name else (selected_scenario if selected_scenario != "(none)" else "")
+            if not target_scenario:
                 st.warning("Enter a valid scenario name.")
             else:
-                payload = _collect_scenario_payload()
-                payload["name"] = scenario_name
-                (scenarios_path / f"{scenario_name}.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-                st.success(f"Saved scenario: {scenario_name}")
-                st.rerun()
+                # Save is executed after all sidebar widgets are evaluated so current values are persisted.
+                st.session_state["_pending_save_scenario_name"] = target_scenario
+
+    typed_name_preview = _sanitize_scenario_name(st.session_state.get("scenario_name_input", ""))
+    resolved_save_target = typed_name_preview if typed_name_preview else (selected_scenario if selected_scenario != "(none)" else "(none)")
+    st.sidebar.caption(f"Save target: {resolved_save_target}")
 
     uploaded_scenario = st.sidebar.file_uploader("Upload scenario JSON", type=["json"], key="scenario_upload")
     if st.sidebar.button("Load Uploaded", key="load_uploaded_scenario"):
@@ -208,14 +265,21 @@ def show_sidebar():
     live_fx_available = False
     if use_live_fx:
         try:
-            currency_rate, fx_timestamp, fx_source = get_live_fx_rate("USD", currency)
+            usd_to_currency_rate, fx_timestamp, fx_source = get_live_fx_rate("USD", currency)
+            # Keep `currency_rate` semantics aligned with static values: 1 <currency> = X USD.
+            # Frankfurter call above returns USD->currency, so invert it.
+            if usd_to_currency_rate > 0:
+                currency_rate = 1 / usd_to_currency_rate
+            else:
+                currency_rate = static_currency_rate
+                fx_source = "Static model assumption (live API returned invalid rate)"
             live_fx_available = True
         except Exception:
             currency_rate = static_currency_rate
             fx_source = "Static model assumption (live API unavailable)"
             fx_timestamp = pd.Timestamp.now().strftime("%d/%m/%Y %H:%M:%S")
     conversion_factor = 1 / currency_rate
-    st.sidebar.markdown(f"*Cost inputs are in USD, management fee is in {currency}.*")
+    st.sidebar.markdown("*All cost inputs and calculations use USD. Display currency only converts outputs.*")
     st.sidebar.caption(
         f"Exchange rate used vs USD: 1 USD = {conversion_factor:.4f} {currency} | "
         f"1 {currency} = {currency_rate:.4f} USD"
@@ -230,6 +294,18 @@ def show_sidebar():
     annual_hours_per_ac = st.sidebar.number_input(
         "Annual flight hours per aircraft", min_value=100, max_value=3000, step=50, key="annual_hours_input"
     )
+
+    # Ensure newly active aircraft PMI fields start at 480, and heal stale zero defaults from prior sessions.
+    skip_pmi_init = bool(st.session_state.pop("_skip_pmi_default_init_once", False))
+    if not skip_pmi_init:
+        previous_fleet_size = int(st.session_state.get("_last_fleet_size_for_pmi_defaults", 0))
+        if previous_fleet_size != int(fleet_size):
+            for i in range(int(fleet_size)):
+                key = f"ac_{i+1}_pmi"
+                current_val = st.session_state.get(key)
+                if current_val is None or current_val == 0:
+                    st.session_state[key] = 480
+        st.session_state["_last_fleet_size_for_pmi_defaults"] = int(fleet_size)
 
     # Maintenance approach
     st.sidebar.subheader("Maintenance approach")
@@ -260,7 +336,7 @@ def show_sidebar():
         step=0.5,
         key="geographic_contingency_pct_input"
     )
-    st.sidebar.caption("Applied to customer-facing manpower, parts, and management fee costs.")
+    st.sidebar.caption("Applied to customer-facing manpower, parts, and MRO operating overhead costs.")
 
 
 
@@ -277,14 +353,18 @@ def show_sidebar():
 
     custom_ac_dates = []
     if use_custom_ac_dates:
-        # Use a stable key per aircraft index (not dependent on fleet size)
-        default_dates = [planning_start_date + pd.DateOffset(months=3*i) for i in range(fleet_size)]
+        auto_stagger_dates = fleet_size > 2
+        if auto_stagger_dates:
+            st.sidebar.caption("Custom start dates are auto-staggered in aircraft pairs at 3-month increments from planning start date.")
         for i in range(fleet_size):
             widget_key = f"ac_{i+1}_start_date"
+            if auto_stagger_dates:
+                st.session_state[widget_key] = (pd.Timestamp(planning_start_date) + pd.DateOffset(months=3 * (i // 2))).date()
             ac_date = st.sidebar.date_input(
                 f"Aircraft {i+1} start date",
                 key=widget_key,
-                format="DD/MM/YYYY"
+                format="DD/MM/YYYY",
+                disabled=auto_stagger_dates,
             )
             custom_ac_dates.append(ac_date)
     else:
@@ -299,6 +379,7 @@ def show_sidebar():
     st.sidebar.subheader("Hours Until Next PMI (per aircraft)")
     hours_until_pmi = []
     for i in range(fleet_size):
+        st.session_state.setdefault(f"ac_{i+1}_pmi", 480)
         hours = st.sidebar.number_input(
             f"Aircraft {i+1} hours until next PMI", min_value=0, max_value=480, key=f"ac_{i+1}_pmi"
         )
@@ -317,28 +398,36 @@ def show_sidebar():
     # Labour Rate
     st.sidebar.subheader("Labour Rate")
     labour_rate = st.sidebar.number_input(
-        f"Labour Rate per hour ({currency})", min_value=0.0, step=1.0, key="labour_rate_input"
+        "Labour Rate per hour (USD)", min_value=0.0, step=1.0, key="labour_rate_input"
     )
 
     # Labour Cost
     labour_cost = st.sidebar.number_input(
-        f"Labour Cost per hour ({currency})", min_value=0.0, step=1.0, key="labour_cost_input"
+        "Labour Cost per hour (USD)", min_value=0.0, step=1.0, key="labour_cost_input"
     )
 
 
     # Management fee
     if 'mgmt_fee_usd' not in st.session_state:
         st.session_state.mgmt_fee_usd = 10000.0
-    mgmt_fee_display = st.session_state.mgmt_fee_usd * conversion_factor
     annual_management_fee_per_ac = st.sidebar.slider(
-        f"Annual management fee per aircraft ({currency})",
+        "Annual management fee per aircraft (USD)",
         0,
-        int(100000 * conversion_factor),
-        int(mgmt_fee_display),
-        int(1000 * conversion_factor),
+        100000,
+        int(st.session_state.mgmt_fee_usd),
+        1000,
         key="annual_management_fee_input"
     )
-    st.session_state.mgmt_fee_usd = annual_management_fee_per_ac / conversion_factor
+    st.session_state.mgmt_fee_usd = float(annual_management_fee_per_ac)
+
+    pending_save_name = st.session_state.pop("_pending_save_scenario_name", None)
+    if pending_save_name:
+        payload = _collect_scenario_payload()
+        payload["name"] = pending_save_name
+        (scenarios_path / f"{pending_save_name}.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        st.session_state["_pending_post_save_selection"] = pending_save_name
+        st.session_state["_pending_save_success"] = pending_save_name
+        st.rerun()
 
     # Return all sidebar values as a dict
     return {
