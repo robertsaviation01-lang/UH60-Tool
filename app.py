@@ -893,6 +893,59 @@ def _calculate_mro_levels_comparison(values):
 	return pd.DataFrame(results)
 
 
+def _compute_parts_supply_only_contract_package(values, costings_df=None, apply_escalation=True):
+	"""Return contract totals for Parts Supply Only mode using required component rules."""
+	if costings_df is None or costings_df.empty:
+		try:
+			costings_df = _build_costings_dataframe(values, apply_escalation=apply_escalation)
+		except Exception:
+			costings_df = pd.DataFrame()
+
+	contract_years = max(int(values.get("years", 1)), 1)
+	escalation_rate = float(values.get("annual_escalation", 0.0)) / 100.0
+	contingency_multiplier = 1.0 + (float(values.get("geographic_contingency_pct", 0.0)) / 100.0)
+	productive_hours = int(values.get("mp_productive_hrs", 1500))
+	labour_rate = float(values.get("labour_rate", 0.0))
+
+	parts_total = float(costings_df["Parts Cost"].sum()) if "Parts Cost" in costings_df.columns else 0.0
+	management_fee_total = float(costings_df["Management Fee"].sum()) if "Management Fee" in costings_df.columns else 0.0
+	contract_fh_total = float(costings_df["Total FH"].sum()) if "Total FH" in costings_df.columns else 0.0
+
+	if "Rotables Store" in costings_df.columns:
+		rotables_store_total = float(costings_df["Rotables Store"].sum())
+	else:
+		base_rotables = float(values.get("mro_cost_rotables_store", 0.0)) * contingency_multiplier
+		rotables_store_total = 0.0
+		for y in range(contract_years):
+			esc = (1 + escalation_rate) ** y if apply_escalation else 1.0
+			rotables_store_total += base_rotables * esc
+
+	coordinator_annual_charge_base = productive_hours * labour_rate * contingency_multiplier
+	coordinator_contract_charge = 0.0
+	for y in range(contract_years):
+		esc = (1 + escalation_rate) ** y if apply_escalation else 1.0
+		coordinator_contract_charge += coordinator_annual_charge_base * esc
+	coordinator_contract_hours = float(productive_hours * contract_years)
+
+	total_contract_cost = parts_total + rotables_store_total + management_fee_total + coordinator_contract_charge
+	avg_annual_cost = total_contract_cost / contract_years if contract_years > 0 else 0.0
+	cost_per_fh = (total_contract_cost / contract_fh_total) if contract_fh_total > 0 else 0.0
+	hours_per_fh = (coordinator_contract_hours / contract_fh_total) if contract_fh_total > 0 else 0.0
+
+	return {
+		"parts_total": parts_total,
+		"rotables_store_total": rotables_store_total,
+		"management_fee_total": management_fee_total,
+		"coordinator_contract_charge": coordinator_contract_charge,
+		"coordinator_contract_hours": coordinator_contract_hours,
+		"contract_fh_total": contract_fh_total,
+		"total_contract_cost": total_contract_cost,
+		"avg_annual_cost": avg_annual_cost,
+		"cost_per_fh": cost_per_fh,
+		"hours_per_fh": hours_per_fh,
+	}
+
+
 def _build_mro_levels_comparison_charts(values):
 	"""Build grouped bar charts for MRO capability level comparison."""
 	comparison_df = _calculate_mro_levels_comparison(values)
@@ -967,9 +1020,11 @@ def _build_report_sections(values):
 	fleet_size = int(values["fleet_size"])
 	annual_hours = float(values["annual_hours_per_ac"])
 	contract_years = int(values["years"])
+	is_parts_only_mode = _is_parts_supply_only_mode(values.get("maintenance_mode"))
 	contingency_pct = float(values.get("geographic_contingency_pct", 0.0))
 	contingency_multiplier = 1.0 + (contingency_pct / 100.0)
 	contract_fleet_hours_nominal = fleet_size * annual_hours * contract_years
+	costings_df_report = pd.DataFrame()
 	try:
 		costings_df_report = _build_costings_dataframe(values, apply_escalation=True)
 		contract_fleet_hours_phased = float(costings_df_report["Total FH"].sum())
@@ -992,10 +1047,21 @@ def _build_report_sections(values):
 	annual_overheads_base, annual_overheads_total = _annual_mro_overheads_from_values(values)
 	annual_overheads_total_loaded = annual_overheads_total * contingency_multiplier
 	management_fee_per_fh = (contract_management_fee / contract_fleet_hours_phased) if contract_fleet_hours_phased > 0 else 0.0
-
-	mro = _compute_mro_staffing(values)
-	contract_cost_per_fh = (contract_total_cost / contract_fleet_hours_phased) if contract_fleet_hours_phased > 0 else 0.0
-	manpower_hours_per_fh = (mro['annual_avg_mh'] / (fleet_size * annual_hours)) if fleet_size * annual_hours > 0 else 0.0
+	parts_mode_package = None
+	if is_parts_only_mode:
+		parts_mode_package = _compute_parts_supply_only_contract_package(values, costings_df=costings_df_report, apply_escalation=True)
+		contract_total_cost = float(parts_mode_package["total_contract_cost"])
+		contract_avg_annual_cost = float(parts_mode_package["avg_annual_cost"])
+		contract_cost_per_fh = float(parts_mode_package["cost_per_fh"])
+		manpower_hours_per_fh = float(parts_mode_package["hours_per_fh"])
+		contract_management_fee = float(parts_mode_package["management_fee_total"])
+		annual_management_fee = (contract_management_fee / contract_years) if contract_years > 0 else 0.0
+		management_fee_per_fh = (contract_management_fee / contract_fleet_hours_phased) if contract_fleet_hours_phased > 0 else 0.0
+		contract_overheads = 0.0
+	else:
+		mro = _compute_mro_staffing(values)
+		contract_cost_per_fh = (contract_total_cost / contract_fleet_hours_phased) if contract_fleet_hours_phased > 0 else 0.0
+		manpower_hours_per_fh = (mro['annual_avg_mh'] / (fleet_size * annual_hours)) if fleet_size * annual_hours > 0 else 0.0
 
 	# Dashboard-like downtime and availability summary.
 	total_sched_downtime_days = 0.0
@@ -1090,42 +1156,63 @@ def _build_report_sections(values):
 		f"Unscheduled Downtime per A/C per Year: {total_unsched_downtime_days:.1f} days",
 		f"Technical Availability: {tech_avail_pct:.1f}%",
 	] + [f"- Aircraft {idx + 1} start: {_get_aircraft_start(values, idx, planning_start_date).strftime('%d/%m/%Y')}" for idx in range(fleet_size)]))
-	sections.append(("Costings", [
-		f"Contract Period: {planning_start_date.strftime('%d/%m/%Y')} - {(planning_start_date + pd.DateOffset(years=contract_years) - pd.Timedelta(days=1)).strftime('%d/%m/%Y')}",
-		f"Contract Average Annual Cost: {_format_currency(currency_symbol, contract_avg_annual_cost * display_factor, 0)}",
-		f"Total Contract Cost: {_format_currency(currency_symbol, contract_total_cost * display_factor, 0)}",
-		f"Annual MRO Overheads (loaded): {_format_currency(currency_symbol, annual_overheads_total_loaded * display_factor, 0)}",
-		f"Contract MRO Overheads: {_format_currency(currency_symbol, contract_overheads * display_factor, 0)}",
-		f"Contract FH (Phased): {contract_fleet_hours_phased:,.1f}",
-		f"Contract FH (Nominal): {contract_fleet_hours_nominal:,.1f}",
-		f"Display Currency: {values.get('currency')}",
-		f"FX Source: {values.get('fx_source', 'Static model assumption')}",
-		f"FX Timestamp: {values.get('fx_timestamp', 'N/A')}",
-		f"Contract Management Fee: {_format_currency(currency_symbol, contract_management_fee * display_factor, 0)}",
-		f"Annual Management Fee: {_format_currency(currency_symbol, annual_management_fee * display_factor, 0)}",
-		f"Management Fee / FH: {_format_currency(currency_symbol, management_fee_per_fh * display_factor, 2)}",
-		f"Geographic Contingency: {contingency_pct:.1f}%",
-		f"Labour Rate: {_format_currency(currency_symbol, float(values.get('labour_rate', 0.0)) * display_factor, 2)} per hour",
-		f"Escalation Rate: {float(values.get('annual_escalation', 0.0)):.1f}%",
-	] + [
-		f"{label}: {_format_currency(currency_symbol, amount * contingency_multiplier * display_factor, 0)} per year"
-		for label, amount in annual_overheads_base.items()
-	]))
-	try:
-		mro_comp_df = _calculate_mro_levels_comparison(values)
-		if not mro_comp_df.empty:
-			min_row = mro_comp_df.loc[mro_comp_df["Total Cost"].idxmin()]
-			max_row = mro_comp_df.loc[mro_comp_df["Total Cost"].idxmax()]
-			comparison_lines = [
-				"Comparison includes Lean, Standard, and Full capability overhead profiles across all maintenance approaches.",
-				f"Lowest Total Cost: {min_row['Maintenance Approach']} / {min_row['MRO Level']} = {_format_currency(currency_symbol, float(min_row['Total Cost']) * display_factor, 0)}",
-				f"Highest Total Cost: {max_row['Maintenance Approach']} / {max_row['MRO Level']} = {_format_currency(currency_symbol, float(max_row['Total Cost']) * display_factor, 0)}",
-			]
-		else:
-			comparison_lines = ["No comparison data available for current inputs."]
-	except Exception:
-		comparison_lines = ["Comparison data unavailable due to calculation error."]
-	sections.append(("MRO Capability Levels Comparison", comparison_lines))
+	if is_parts_only_mode and parts_mode_package is not None:
+		sections.append(("Costings", [
+			f"Contract Period: {planning_start_date.strftime('%d/%m/%Y')} - {(planning_start_date + pd.DateOffset(years=contract_years) - pd.Timedelta(days=1)).strftime('%d/%m/%Y')}",
+			"Parts Supply Only costing rule applied:",
+			f"Total Contract Parts Cost: {_format_currency(currency_symbol, float(parts_mode_package['parts_total']) * display_factor, 0)}",
+			f"Rotables Store (Contract): {_format_currency(currency_symbol, float(parts_mode_package['rotables_store_total']) * display_factor, 0)}",
+			f"Contract Management Fee: {_format_currency(currency_symbol, float(parts_mode_package['management_fee_total']) * display_factor, 0)}",
+			f"Single Parts / Logistics Coordinator (Contract): {_format_currency(currency_symbol, float(parts_mode_package['coordinator_contract_charge']) * display_factor, 0)}",
+			f"Total Contract Cost: {_format_currency(currency_symbol, contract_total_cost * display_factor, 0)}",
+			f"Contract Average Annual Cost: {_format_currency(currency_symbol, contract_avg_annual_cost * display_factor, 0)}",
+			f"Contract Cost / FH: {_format_currency(currency_symbol, contract_cost_per_fh * display_factor, 2)}",
+			f"Contract FH (Phased): {contract_fleet_hours_phased:,.1f}",
+			f"Contract FH (Nominal): {contract_fleet_hours_nominal:,.1f}",
+			f"Display Currency: {values.get('currency')}",
+			f"FX Source: {values.get('fx_source', 'Static model assumption')}",
+			f"FX Timestamp: {values.get('fx_timestamp', 'N/A')}",
+			f"Geographic Contingency: {contingency_pct:.1f}%",
+			f"Labour Rate: {_format_currency(currency_symbol, float(values.get('labour_rate', 0.0)) * display_factor, 2)} per hour",
+			f"Escalation Rate: {float(values.get('annual_escalation', 0.0)):.1f}%",
+		]))
+	else:
+		sections.append(("Costings", [
+			f"Contract Period: {planning_start_date.strftime('%d/%m/%Y')} - {(planning_start_date + pd.DateOffset(years=contract_years) - pd.Timedelta(days=1)).strftime('%d/%m/%Y')}",
+			f"Contract Average Annual Cost: {_format_currency(currency_symbol, contract_avg_annual_cost * display_factor, 0)}",
+			f"Total Contract Cost: {_format_currency(currency_symbol, contract_total_cost * display_factor, 0)}",
+			f"Annual MRO Overheads (loaded): {_format_currency(currency_symbol, annual_overheads_total_loaded * display_factor, 0)}",
+			f"Contract MRO Overheads: {_format_currency(currency_symbol, contract_overheads * display_factor, 0)}",
+			f"Contract FH (Phased): {contract_fleet_hours_phased:,.1f}",
+			f"Contract FH (Nominal): {contract_fleet_hours_nominal:,.1f}",
+			f"Display Currency: {values.get('currency')}",
+			f"FX Source: {values.get('fx_source', 'Static model assumption')}",
+			f"FX Timestamp: {values.get('fx_timestamp', 'N/A')}",
+			f"Contract Management Fee: {_format_currency(currency_symbol, contract_management_fee * display_factor, 0)}",
+			f"Annual Management Fee: {_format_currency(currency_symbol, annual_management_fee * display_factor, 0)}",
+			f"Management Fee / FH: {_format_currency(currency_symbol, management_fee_per_fh * display_factor, 2)}",
+			f"Geographic Contingency: {contingency_pct:.1f}%",
+			f"Labour Rate: {_format_currency(currency_symbol, float(values.get('labour_rate', 0.0)) * display_factor, 2)} per hour",
+			f"Escalation Rate: {float(values.get('annual_escalation', 0.0)):.1f}%",
+		] + [
+			f"{label}: {_format_currency(currency_symbol, amount * contingency_multiplier * display_factor, 0)} per year"
+			for label, amount in annual_overheads_base.items()
+		]))
+		try:
+			mro_comp_df = _calculate_mro_levels_comparison(values)
+			if not mro_comp_df.empty:
+				min_row = mro_comp_df.loc[mro_comp_df["Total Cost"].idxmin()]
+				max_row = mro_comp_df.loc[mro_comp_df["Total Cost"].idxmax()]
+				comparison_lines = [
+					"Comparison includes Lean, Standard, and Full capability overhead profiles across all maintenance approaches.",
+					f"Lowest Total Cost: {min_row['Maintenance Approach']} / {min_row['MRO Level']} = {_format_currency(currency_symbol, float(min_row['Total Cost']) * display_factor, 0)}",
+					f"Highest Total Cost: {max_row['Maintenance Approach']} / {max_row['MRO Level']} = {_format_currency(currency_symbol, float(max_row['Total Cost']) * display_factor, 0)}",
+				]
+			else:
+				comparison_lines = ["No comparison data available for current inputs."]
+		except Exception:
+			comparison_lines = ["Comparison data unavailable due to calculation error."]
+		sections.append(("MRO Capability Levels Comparison", comparison_lines))
 	sections.append(("Event Library", [
 		f"Scheduled Events Rows: {len(scheduled_df)}",
 		f"Unscheduled Events Rows: {len(unsched_df)}",
@@ -1134,34 +1221,43 @@ def _build_report_sections(values):
 		"Unscheduled Events Preview:",
 	] + (unsched_df.head(8).to_string(index=False).splitlines() if not unsched_df.empty else ["No unscheduled events loaded."])))
 
-	cs = currency_symbol
-	mro_lines = [
-		f"Productive hrs/person/year: {mro['mp_productive_hrs']}",
-		f"Mechanics per LAE: {mro['mp_engineer_ratio']}",
-		f"Direct maintainers per QC Inspector: {mro['mp_qc_ratio']}",
-		f"Aircraft per Parts Coordinator: {mro['mp_parts_ratio']}",
-		f"Shift coverage: {mro['mp_shift_coverage']}",
-		f"Planning Officer included: {'Yes' if mro['mp_include_planning'] else 'No'}",
-		"",
-		f"Licensed Aircraft Engineers (LAE): {mro['lae_count']}",
-		f"Aircraft Mechanics: {mro['mechanic_count']}",
-		f"QC / QA Inspectors: {mro['qc_count']}",
-		f"Parts / Logistics Coordinators: {mro['parts_count']}",
-		f"Planning & Engineering Officers: {mro['planning_count']}",
-		f"Total Headcount: {mro['total_staff']}",
-		f"Direct Staff Utilisation: {mro['utilisation_pct']:.1f}%",
-		f"Annual Staff Cost: {_format_currency(cs, mro['annual_staff_cost'] * display_factor, 0)}",
-		f"Annual MRO Labour Charge: {_format_currency(cs, mro['annual_charge'] * display_factor, 0)}",
-	]
-	for yr_data in mro["per_year"]:
-		mro_lines.append(
-			f"Year {yr_data['year']} ({yr_data['period']}): "
-			f"Total={yr_data['total']}  LAE={yr_data['lae']}  "
-			f"Mechs={yr_data['mechanics']}  QC={yr_data['qc']}  "
-			f"Parts={yr_data['parts']}  Util={yr_data['util_pct']:.1f}%  "
-			f"Charge={_format_currency(cs, yr_data['charge'] * display_factor, 0)}"
-		)
-	sections.append(("MRO Manpower Planning", mro_lines))
+	if is_parts_only_mode and parts_mode_package is not None:
+		sections.append(("Parts Supply Staffing", [
+			"Staffing rule applied for Parts Supply Only mode:",
+			"Parts / Logistics Coordinator: 1",
+			f"Productive hrs/person/year: {int(values.get('mp_productive_hrs', 1500))}",
+			f"Coordinator Contract Hours: {float(parts_mode_package['coordinator_contract_hours']):,.0f}",
+			f"Coordinator Contract Charge: {_format_currency(currency_symbol, float(parts_mode_package['coordinator_contract_charge']) * display_factor, 0)}",
+		]))
+	else:
+		cs = currency_symbol
+		mro_lines = [
+			f"Productive hrs/person/year: {mro['mp_productive_hrs']}",
+			f"Mechanics per LAE: {mro['mp_engineer_ratio']}",
+			f"Direct maintainers per QC Inspector: {mro['mp_qc_ratio']}",
+			f"Aircraft per Parts Coordinator: {mro['mp_parts_ratio']}",
+			f"Shift coverage: {mro['mp_shift_coverage']}",
+			f"Planning Officer included: {'Yes' if mro['mp_include_planning'] else 'No'}",
+			"",
+			f"Licensed Aircraft Engineers (LAE): {mro['lae_count']}",
+			f"Aircraft Mechanics: {mro['mechanic_count']}",
+			f"QC / QA Inspectors: {mro['qc_count']}",
+			f"Parts / Logistics Coordinators: {mro['parts_count']}",
+			f"Planning & Engineering Officers: {mro['planning_count']}",
+			f"Total Headcount: {mro['total_staff']}",
+			f"Direct Staff Utilisation: {mro['utilisation_pct']:.1f}%",
+			f"Annual Staff Cost: {_format_currency(cs, mro['annual_staff_cost'] * display_factor, 0)}",
+			f"Annual MRO Labour Charge: {_format_currency(cs, mro['annual_charge'] * display_factor, 0)}",
+		]
+		for yr_data in mro["per_year"]:
+			mro_lines.append(
+				f"Year {yr_data['year']} ({yr_data['period']}): "
+				f"Total={yr_data['total']}  LAE={yr_data['lae']}  "
+				f"Mechs={yr_data['mechanics']}  QC={yr_data['qc']}  "
+				f"Parts={yr_data['parts']}  Util={yr_data['util_pct']:.1f}%  "
+				f"Charge={_format_currency(cs, yr_data['charge'] * display_factor, 0)}"
+			)
+		sections.append(("MRO Manpower Planning", mro_lines))
 
 	return sections
 
@@ -1178,6 +1274,7 @@ def _build_pdf_report(values):
 	logo_path = os.path.join("ui", "acehawk_logo.png")
 	timestamp = pd.Timestamp.now().strftime("%d/%m/%Y %H:%M:%S")
 	scenario_name = str(values.get("scenario_name", "") or "")
+	is_parts_only_mode = _is_parts_supply_only_mode(values.get("maintenance_mode"))
 
 	def draw_page_header():
 		if os.path.exists(logo_path):
@@ -1210,11 +1307,12 @@ def _build_pdf_report(values):
 	mro_comparison_total_fig = None
 	mro_comparison_fh_fig = None
 	mro_comparison_error = None
-	try:
-		mro_comparison_df, mro_comparison_total_fig, mro_comparison_fh_fig = _build_mro_levels_comparison_charts(values)
-	except Exception as exc:
-		mro_comparison_error = str(exc)
-		mro_comparison_df = pd.DataFrame()
+	if not is_parts_only_mode:
+		try:
+			mro_comparison_df, mro_comparison_total_fig, mro_comparison_fh_fig = _build_mro_levels_comparison_charts(values)
+		except Exception as exc:
+			mro_comparison_error = str(exc)
+			mro_comparison_df = pd.DataFrame()
 	draw_page_header()
 	y = page_height - 120
 
@@ -1384,36 +1482,37 @@ def _build_pdf_report(values):
 			y = draw_mro_table_in_pdf(mro_staffing_for_pdf, y)
 		y -= 8
 
-	# Always render a dedicated MRO comparison page in the PDF so print/download includes the table and graphs.
-	pdf.showPage()
-	draw_page_header()
-	y = page_height - 120
-	pdf.setFont("Helvetica-Bold", 13)
-	pdf.drawString(margin, y, "MRO Capability Levels Comparison")
-	y -= 18
-	pdf.setFont("Helvetica", 9)
-	if mro_comparison_error:
-		y = ensure_space(y, 12)
-		pdf.drawString(margin, y, f"Unable to calculate MRO comparison charts: {mro_comparison_error}")
-		y -= 12
-	if mro_comparison_df.empty:
-		y = ensure_space(y, 12)
-		pdf.drawString(margin, y, "No MRO capability comparison data available for current inputs.")
-		y -= 12
-	else:
-		y = draw_mro_comparison_table_in_pdf(mro_comparison_df, y)
-		if mro_comparison_total_fig is not None:
-			y = draw_chart_in_pdf(mro_comparison_total_fig, y)
-		else:
+	if not is_parts_only_mode:
+		# Always render a dedicated MRO comparison page in the PDF so print/download includes the table and graphs.
+		pdf.showPage()
+		draw_page_header()
+		y = page_height - 120
+		pdf.setFont("Helvetica-Bold", 13)
+		pdf.drawString(margin, y, "MRO Capability Levels Comparison")
+		y -= 18
+		pdf.setFont("Helvetica", 9)
+		if mro_comparison_error:
 			y = ensure_space(y, 12)
-			pdf.drawString(margin, y, "Total Cost comparison graph unavailable.")
+			pdf.drawString(margin, y, f"Unable to calculate MRO comparison charts: {mro_comparison_error}")
 			y -= 12
-		if mro_comparison_fh_fig is not None:
-			y = draw_chart_in_pdf(mro_comparison_fh_fig, y)
-		else:
+		if mro_comparison_df.empty:
 			y = ensure_space(y, 12)
-			pdf.drawString(margin, y, "Cost/FH comparison graph unavailable.")
+			pdf.drawString(margin, y, "No MRO capability comparison data available for current inputs.")
 			y -= 12
+		else:
+			y = draw_mro_comparison_table_in_pdf(mro_comparison_df, y)
+			if mro_comparison_total_fig is not None:
+				y = draw_chart_in_pdf(mro_comparison_total_fig, y)
+			else:
+				y = ensure_space(y, 12)
+				pdf.drawString(margin, y, "Total Cost comparison graph unavailable.")
+				y -= 12
+			if mro_comparison_fh_fig is not None:
+				y = draw_chart_in_pdf(mro_comparison_fh_fig, y)
+			else:
+				y = ensure_space(y, 12)
+				pdf.drawString(margin, y, "Cost/FH comparison graph unavailable.")
+				y -= 12
 
 	pdf.save()
 	buffer.seek(0)
@@ -1541,6 +1640,7 @@ def show_dashboard(values):
 
 	# Compute cost metrics directly from annual costings engine so dashboard matches costings tab.
 	display_factor = _display_conversion_factor(values)
+	is_parts_only_mode = _is_parts_supply_only_mode(values.get("maintenance_mode"))
 	try:
 		costings_df = _build_costings_dataframe(values, apply_escalation=True)
 		_contract_fh_total = float(costings_df["Total FH"].sum())
@@ -1550,6 +1650,12 @@ def show_dashboard(values):
 		_cost_per_fh = _contract_total_cost / _contract_fh_total if _contract_fh_total > 0 else 0.0
 		_mh_per_fh = _contract_total_mh / _contract_fh_total if _contract_fh_total > 0 else 0.0
 		_avg_annual_cost = _contract_total_cost / _n_years if _n_years > 0 else 0.0
+		if is_parts_only_mode:
+			parts_mode_package = _compute_parts_supply_only_contract_package(values, costings_df=costings_df, apply_escalation=True)
+			_contract_total_cost = float(parts_mode_package["total_contract_cost"])
+			_cost_per_fh = float(parts_mode_package["cost_per_fh"])
+			_mh_per_fh = float(parts_mode_package["hours_per_fh"])
+			_avg_annual_cost = float(parts_mode_package["avg_annual_cost"])
 		contract_fleet_hours = _contract_fh_total
 	except Exception:
 		_contract_total_cost = 0.0
