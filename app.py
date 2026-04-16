@@ -1083,7 +1083,7 @@ def _build_report_sections(values):
 		f"Planning Start Date: {planning_start_date.strftime('%d/%m/%Y')}",
 		f"Maintenance Mode: {values.get('maintenance_mode')}",
 		"Planning Horizon Event Totals (Fleet):",
-	] + [f"- {event_name}: {count}" for event_name, count in sorted(maintenance_summary.items()) if count > 0]))
+	] + [f"- {event_name}: {int(round(float(count)))}" for event_name, count in sorted(maintenance_summary.items()) if count > 0]))
 	sections.append(("Availability & Downtime", [
 		f"Target Availability: {float(values.get('target_availability', 75.0)):.1f}%",
 		f"Scheduled Downtime per A/C per Year: {total_sched_downtime_days:.1f} days",
