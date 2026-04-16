@@ -15,7 +15,6 @@ import plotly.graph_objects as go
 from io import BytesIO
 from urllib.parse import quote
 import math
-import concurrent.futures
 
 # Import sidebar component
 from ui.sidebar import show_sidebar
@@ -1299,61 +1298,33 @@ def _build_pdf_report(values):
 			return page_height - 110
 		return current_y
 
-	def safe_build_figure(builder_fn):
-		try:
-			return builder_fn(values)
-		except Exception:
-			return None
-
 	try:
 		sections = _build_report_sections(values)
 	except Exception as exc:
 		sections = [("Dashboard", [f"Report content generation failed: {exc}"])]
 
-	maintenance_schedule_fig = safe_build_figure(_build_maintenance_schedule_figure)
-	maintenance_timeline_fig = safe_build_figure(_build_maintenance_timeline_figure)
-	costings_fh_cost_fig = safe_build_figure(_build_costings_fh_cost_figure)
-	overheads_fh_cost_fig = safe_build_figure(_build_overheads_fh_cost_figure)
+	# Chart images are not embedded in the PDF (kaleido hangs in hosted environments).
+	maintenance_schedule_fig = None
+	maintenance_timeline_fig = None
+	costings_fh_cost_fig = None
+	overheads_fh_cost_fig = None
 	mro_comparison_df = pd.DataFrame()
 	mro_comparison_total_fig = None
 	mro_comparison_fh_fig = None
 	mro_comparison_error = None
 	if not is_parts_only_mode:
 		try:
-			mro_comparison_df, mro_comparison_total_fig, mro_comparison_fh_fig = _build_mro_levels_comparison_charts(values)
+			mro_comparison_df, _, _ = _build_mro_levels_comparison_charts(values)
 		except Exception as exc:
 			mro_comparison_error = str(exc)
 			mro_comparison_df = pd.DataFrame()
 	draw_page_header()
 	y = page_height - 120
 
-	def _fig_to_image_timeout(fig, timeout_secs=20):
-		"""Export fig to PNG bytes with a hard timeout; returns None on timeout or error."""
-		with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _executor:
-			_future = _executor.submit(fig.to_image, format="png", width=1400, height=800, scale=2)
-			try:
-				return _future.result(timeout=timeout_secs)
-			except concurrent.futures.TimeoutError:
-				return None
-			except Exception:
-				return None
-
 	def draw_chart_in_pdf(fig, current_y):
-		if fig is None:
-			return current_y
-		img_bytes = _fig_to_image_timeout(fig)
-		if img_bytes is None:
-			current_y = ensure_space(current_y, 14)
-			pdf.setFont("Helvetica-Oblique", 9)
-			pdf.drawString(margin, current_y, "Chart export unavailable in this environment (install kaleido for Plotly image rendering).")
-			return current_y - 14
-
-		chart_width = page_width - (2 * margin)
-		chart_height = chart_width * 0.5
-		current_y = ensure_space(current_y, chart_height + 12)
-		img_reader = ImageReader(BytesIO(img_bytes))
-		pdf.drawImage(img_reader, margin, current_y - chart_height, width=chart_width, height=chart_height, preserveAspectRatio=True, mask='auto')
-		return current_y - chart_height - 10
+		# Chart image export is skipped in PDF (kaleido subprocess hangs in hosted environments).
+		# Charts are viewable interactively in the app.
+		return current_y
 
 	def draw_mro_table_in_pdf(mro_data, current_y):
 		from reportlab.platypus import Table, TableStyle
