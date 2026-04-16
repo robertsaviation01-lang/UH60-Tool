@@ -1535,34 +1535,67 @@ def _build_pdf_report(values):
 
 def _render_print_report_actions(values):
 	st.subheader("Print Report")
-	# Augment values with scenario name and MRO staffing params from current session state
-	report_values = dict(values)
-	report_values["scenario_name"] = st.session_state.get(
-		"scenario_last_loaded", st.session_state.get("scenario_name_input", "N/A")
-	)
-	report_values["mp_productive_hrs"] = int(st.session_state.get("mp_productive_hrs", 1500))
-	report_values["mp_engineer_ratio"] = int(st.session_state.get("mp_engineer_ratio", 3))
-	report_values["mp_qc_ratio"] = int(st.session_state.get("mp_qc_ratio", 8))
-	report_values["mp_parts_ratio"] = int(st.session_state.get("mp_parts_ratio", 4))
-	report_values["mp_include_planning"] = bool(st.session_state.get("mp_include_planning", True))
-	report_values["mp_shift_coverage"] = str(st.session_state.get("mp_shift_coverage", "Single shift (1×)"))
-	for _, overhead_key in _mro_overhead_categories():
-		report_values[overhead_key] = float(st.session_state.get(overhead_key, 0.0))
-	# Force a fresh costing pass for the PDF so report values never come from stale cache entries.
-	try:
-		_build_costings_dataframe.clear()
-	except Exception:
-		pass
-	try:
-		report_pdf, report_filename, email_subject, email_body = _build_pdf_report(report_values)
-	except ModuleNotFoundError:
-		st.warning("PDF reporting is unavailable because the ReportLab package is not installed in the Python environment used by Streamlit.")
-		st.info("Install it in the interpreter running the app with: .venv\\Scripts\\python.exe -m pip install reportlab")
+	if "report_pdf_payload" not in st.session_state:
+		st.session_state["report_pdf_payload"] = None
+
+	col_generate, col_clear = st.columns(2)
+	with col_generate:
+		generate_requested = st.button("Generate / Refresh PDF", use_container_width=True)
+	with col_clear:
+		clear_requested = st.button("Clear Generated PDF", use_container_width=True)
+
+	if clear_requested:
+		st.session_state["report_pdf_payload"] = None
+
+	if generate_requested:
+		# Augment values with scenario name and MRO staffing params from current session state
+		report_values = dict(values)
+		report_values["scenario_name"] = st.session_state.get(
+			"scenario_last_loaded", st.session_state.get("scenario_name_input", "N/A")
+		)
+		report_values["mp_productive_hrs"] = int(st.session_state.get("mp_productive_hrs", 1500))
+		report_values["mp_engineer_ratio"] = int(st.session_state.get("mp_engineer_ratio", 3))
+		report_values["mp_qc_ratio"] = int(st.session_state.get("mp_qc_ratio", 8))
+		report_values["mp_parts_ratio"] = int(st.session_state.get("mp_parts_ratio", 4))
+		report_values["mp_include_planning"] = bool(st.session_state.get("mp_include_planning", True))
+		report_values["mp_shift_coverage"] = str(st.session_state.get("mp_shift_coverage", "Single shift (1×)"))
+		for _, overhead_key in _mro_overhead_categories():
+			report_values[overhead_key] = float(st.session_state.get(overhead_key, 0.0))
+
+		# Force a fresh costing pass for the PDF so report values never come from stale cache entries.
+		try:
+			_build_costings_dataframe.clear()
+		except Exception:
+			pass
+
+		try:
+			report_pdf, report_filename, email_subject, email_body = _build_pdf_report(report_values)
+			st.session_state["report_pdf_payload"] = {
+				"report_pdf": report_pdf,
+				"report_filename": report_filename,
+				"email_subject": email_subject,
+				"email_body": email_body,
+			}
+			st.success("PDF report generated. Download and print actions are now enabled.")
+		except ModuleNotFoundError:
+			st.warning("PDF reporting is unavailable because the ReportLab package is not installed in the Python environment used by Streamlit.")
+			st.info("Install it in the interpreter running the app with: .venv\\Scripts\\python.exe -m pip install reportlab")
+			st.session_state["report_pdf_payload"] = None
+			return
+		except Exception as exc:
+			st.error("Unable to generate PDF report with current inputs.")
+			st.exception(exc)
+			st.session_state["report_pdf_payload"] = None
+
+	payload = st.session_state.get("report_pdf_payload")
+	if not payload:
+		st.info("Click Generate / Refresh PDF to enable Download and Print actions.")
 		return
-	except Exception as exc:
-		st.error("Unable to generate PDF report with current inputs.")
-		st.exception(exc)
-		return
+
+	report_pdf = payload["report_pdf"]
+	report_filename = payload["report_filename"]
+	email_subject = payload["email_subject"]
+	email_body = payload["email_body"]
 	pdf_b64 = base64.b64encode(report_pdf).decode("utf-8")
 
 	col1, col2 = st.columns(2)
