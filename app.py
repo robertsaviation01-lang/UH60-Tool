@@ -806,6 +806,155 @@ def _compute_mro_staffing(values):
 	}
 
 
+def _get_mro_level_presets():
+	"""Return the three MRO capability level presets."""
+	return {
+		"Lean": {
+			"mro_cost_insurance": {"fixed": 30000.0, "per_ac": 2500.0},
+			"mro_cost_facility": {"fixed": 120000.0, "per_ac": 5000.0},
+			"mro_cost_gse": {"fixed": 20000.0, "per_ac": 2100.0},
+			"mro_cost_tooling": {"fixed": 40000.0, "per_ac": 2500.0},
+			"mro_cost_engine_bay": {"fixed": 25000.0, "per_ac": 2500.0},
+			"mro_cost_rotables_store": {"fixed": 12000.0, "per_ac": 1500.0},
+			"mro_cost_parts_store": {"fixed": 16000.0, "per_ac": 2000.0},
+			"mro_cost_utilities": {"fixed": 20000.0, "per_ac": 2500.0},
+			"mro_cost_it_quality": {"fixed": 18000.0, "per_ac": 2250.0},
+		},
+		"Standard": {
+			"mro_cost_insurance": {"fixed": 50000.0, "per_ac": 3333.0},
+			"mro_cost_facility": {"fixed": 180000.0, "per_ac": 11667.0},
+			"mro_cost_gse": {"fixed": 35000.0, "per_ac": 4167.0},
+			"mro_cost_tooling": {"fixed": 80000.0, "per_ac": 5000.0},
+			"mro_cost_engine_bay": {"fixed": 60000.0, "per_ac": 5000.0},
+			"mro_cost_rotables_store": {"fixed": 30000.0, "per_ac": 3750.0},
+			"mro_cost_parts_store": {"fixed": 35000.0, "per_ac": 5000.0},
+			"mro_cost_utilities": {"fixed": 40000.0, "per_ac": 5000.0},
+			"mro_cost_it_quality": {"fixed": 38000.0, "per_ac": 3500.0},
+		},
+		"Full": {
+			"mro_cost_insurance": {"fixed": 70000.0, "per_ac": 5000.0},
+			"mro_cost_facility": {"fixed": 260000.0, "per_ac": 20000.0},
+			"mro_cost_gse": {"fixed": 60000.0, "per_ac": 7500.0},
+			"mro_cost_tooling": {"fixed": 140000.0, "per_ac": 10000.0},
+			"mro_cost_engine_bay": {"fixed": 110000.0, "per_ac": 10000.0},
+			"mro_cost_rotables_store": {"fixed": 65000.0, "per_ac": 6666.0},
+			"mro_cost_parts_store": {"fixed": 80000.0, "per_ac": 8333.0},
+			"mro_cost_utilities": {"fixed": 70000.0, "per_ac": 8333.0},
+			"mro_cost_it_quality": {"fixed": 70000.0, "per_ac": 5833.0},
+		},
+	}
+
+
+def _calculate_mro_levels_comparison(values):
+	"""Calculate costs for all 3 MRO levels across all maintenance approaches."""
+	maintenance_approaches = [
+		"Parts Supply Only",
+		"Scheduled Event Library (detailed PMI)",
+		"Scheduled & Unscheduled Event Library (all events)"
+	]
+	mro_levels = _get_mro_level_presets()
+	fleet_size = int(values.get("fleet_size", 1))
+	results = []
+	
+	for approach in maintenance_approaches:
+		for level_name, level_costs in mro_levels.items():
+			# Create a copy of values for this scenario
+			scenario_values = dict(values)
+			scenario_values["maintenance_mode"] = approach
+			
+			# Apply MRO level costs
+			for cost_key, components in level_costs.items():
+				fixed = float(components.get("fixed", 0.0))
+				per_ac = float(components.get("per_ac", 0.0))
+				scenario_values[cost_key] = fixed + (per_ac * fleet_size)
+			
+			# Calculate costs
+			try:
+				costings_df = _build_costings_dataframe(scenario_values, apply_escalation=True)
+				total_cost = float(costings_df["Total Cost"].sum())
+				total_fh = float(costings_df["Total FH"].sum())
+				cost_per_fh = (total_cost / total_fh) if total_fh > 0 else 0.0
+				annual_avg_cost = total_cost / int(values.get("years", 1)) if int(values.get("years", 1)) > 0 else 0.0
+			except Exception:
+				total_cost = 0.0
+				total_fh = 0.0
+				cost_per_fh = 0.0
+				annual_avg_cost = 0.0
+			
+			results.append({
+				"Maintenance Approach": approach,
+				"MRO Level": level_name,
+				"Total Cost": total_cost,
+				"Total FH": total_fh,
+				"Cost/FH": cost_per_fh,
+				"Annual Avg Cost": annual_avg_cost,
+			})
+	
+	return pd.DataFrame(results)
+
+
+def _build_mro_levels_comparison_charts(values):
+	"""Build grouped bar charts for MRO capability level comparison."""
+	comparison_df = _calculate_mro_levels_comparison(values)
+	if comparison_df.empty:
+		return comparison_df, None, None
+
+	display_factor = _display_conversion_factor(values)
+	currency_symbol = values.get("currency_symbol", "$")
+	mro_order = ["Lean", "Standard", "Full"]
+	comparison_df = comparison_df.copy()
+	comparison_df["MRO Level"] = pd.Categorical(
+		comparison_df["MRO Level"],
+		categories=mro_order,
+		ordered=True,
+	)
+	comparison_df = comparison_df.sort_values(["Maintenance Approach", "MRO Level"])
+
+	fig_total = go.Figure()
+	for approach in comparison_df["Maintenance Approach"].dropna().unique().tolist():
+		approach_data = comparison_df[comparison_df["Maintenance Approach"] == approach]
+		fig_total.add_trace(go.Bar(
+			x=approach_data["MRO Level"],
+			y=approach_data["Total Cost"] * display_factor,
+			name=approach,
+			text=[f"{currency_symbol}{v * display_factor:,.0f}" for v in approach_data["Total Cost"]],
+			textposition="outside",
+			hovertemplate="<b>%{name}</b><br>MRO Level: %{x}<br>Total Cost: " + currency_symbol + "%{y:,.0f}<extra></extra>",
+		))
+	fig_total.update_layout(
+		title="Total Contract Cost by MRO Level and Maintenance Approach",
+		xaxis_title="MRO Capability Level",
+		yaxis_title=f"Total Contract Cost ({currency_symbol})",
+		barmode="group",
+		height=500,
+		hovermode="x unified",
+		template="plotly_white",
+	)
+
+	fig_fh = go.Figure()
+	for approach in comparison_df["Maintenance Approach"].dropna().unique().tolist():
+		approach_data = comparison_df[comparison_df["Maintenance Approach"] == approach]
+		fig_fh.add_trace(go.Bar(
+			x=approach_data["MRO Level"],
+			y=approach_data["Cost/FH"] * display_factor,
+			name=approach,
+			text=[f"{currency_symbol}{v * display_factor:,.2f}" for v in approach_data["Cost/FH"]],
+			textposition="outside",
+			hovertemplate="<b>%{name}</b><br>MRO Level: %{x}<br>Cost/FH: " + currency_symbol + "%{y:,.2f}<extra></extra>",
+		))
+	fig_fh.update_layout(
+		title="Cost per Flight Hour by MRO Level and Maintenance Approach",
+		xaxis_title="MRO Capability Level",
+		yaxis_title=f"Cost/FH ({currency_symbol})",
+		barmode="group",
+		height=500,
+		hovermode="x unified",
+		template="plotly_white",
+	)
+
+	return comparison_df, fig_total, fig_fh
+
+
 def _build_report_sections(values):
 	scheduled_path = os.path.join("data", "scheduled_events.csv")
 	unsched_path = os.path.join("data", "unscheduled_events.csv")
@@ -843,6 +992,10 @@ def _build_report_sections(values):
 	annual_overheads_base, annual_overheads_total = _annual_mro_overheads_from_values(values)
 	annual_overheads_total_loaded = annual_overheads_total * contingency_multiplier
 	management_fee_per_fh = (contract_management_fee / contract_fleet_hours_phased) if contract_fleet_hours_phased > 0 else 0.0
+
+	mro = _compute_mro_staffing(values)
+	contract_cost_per_fh = (contract_total_cost / contract_fleet_hours_phased) if contract_fleet_hours_phased > 0 else 0.0
+	manpower_hours_per_fh = (mro['annual_avg_mh'] / (fleet_size * annual_hours)) if fleet_size * annual_hours > 0 else 0.0
 
 	# Dashboard-like downtime and availability summary.
 	total_sched_downtime_days = 0.0
@@ -919,9 +1072,9 @@ def _build_report_sections(values):
 		f"FX Rate: 1 USD = {float(values.get('conversion_factor', 1.0)):.4f} {values.get('currency')}",
 		f"Geographic Contingency: {contingency_pct:.1f}%",
 	] + fh_lines + [
-		f"Contract Cost / FH: calculated in live dashboard",
-		f"Average Annual Cost: calculated in live dashboard",
-		f"Manpower Hours/FH: calculated in live dashboard",
+		f"Contract Cost / FH: {_format_currency(currency_symbol, contract_cost_per_fh * display_factor, 2)}",
+		f"Average Annual Cost: {_format_currency(currency_symbol, contract_avg_annual_cost * display_factor, 0)}",
+		f"Manpower Hours/FH: {manpower_hours_per_fh:.2f}",
 		f"Scheduled Downtime per A/C per Year: {total_sched_downtime_days:.1f} days",
 		f"Unscheduled Downtime per A/C per Year: {total_unsched_downtime_days:.1f} days",
 		f"Technical Availability: {tech_avail_pct:.1f}%",
@@ -958,6 +1111,21 @@ def _build_report_sections(values):
 		f"{label}: {_format_currency(currency_symbol, amount * contingency_multiplier * display_factor, 0)} per year"
 		for label, amount in annual_overheads_base.items()
 	]))
+	try:
+		mro_comp_df = _calculate_mro_levels_comparison(values)
+		if not mro_comp_df.empty:
+			min_row = mro_comp_df.loc[mro_comp_df["Total Cost"].idxmin()]
+			max_row = mro_comp_df.loc[mro_comp_df["Total Cost"].idxmax()]
+			comparison_lines = [
+				"Comparison includes Lean, Standard, and Full capability overhead profiles across all maintenance approaches.",
+				f"Lowest Total Cost: {min_row['Maintenance Approach']} / {min_row['MRO Level']} = {_format_currency(currency_symbol, float(min_row['Total Cost']) * display_factor, 0)}",
+				f"Highest Total Cost: {max_row['Maintenance Approach']} / {max_row['MRO Level']} = {_format_currency(currency_symbol, float(max_row['Total Cost']) * display_factor, 0)}",
+			]
+		else:
+			comparison_lines = ["No comparison data available for current inputs."]
+	except Exception:
+		comparison_lines = ["Comparison data unavailable due to calculation error."]
+	sections.append(("MRO Capability Levels Comparison", comparison_lines))
 	sections.append(("Event Library", [
 		f"Scheduled Events Rows: {len(scheduled_df)}",
 		f"Unscheduled Events Rows: {len(unsched_df)}",
@@ -966,7 +1134,6 @@ def _build_report_sections(values):
 		"Unscheduled Events Preview:",
 	] + (unsched_df.head(8).to_string(index=False).splitlines() if not unsched_df.empty else ["No unscheduled events loaded."])))
 
-	mro = _compute_mro_staffing(values)
 	cs = currency_symbol
 	mro_lines = [
 		f"Productive hrs/person/year: {mro['mp_productive_hrs']}",
@@ -1039,6 +1206,13 @@ def _build_pdf_report(values):
 	maintenance_timeline_fig = _build_maintenance_timeline_figure(values)
 	costings_fh_cost_fig = _build_costings_fh_cost_figure(values)
 	overheads_fh_cost_fig = _build_overheads_fh_cost_figure(values)
+	mro_comparison_df = pd.DataFrame()
+	mro_comparison_total_fig = None
+	mro_comparison_fh_fig = None
+	try:
+		mro_comparison_df, mro_comparison_total_fig, mro_comparison_fh_fig = _build_mro_levels_comparison_charts(values)
+	except Exception:
+		mro_comparison_df = pd.DataFrame()
 	draw_page_header()
 	y = page_height - 120
 
@@ -1140,9 +1314,48 @@ def _build_pdf_report(values):
 			current_y -= yt_h + 10
 		return current_y
 
+	def draw_mro_comparison_table_in_pdf(comparison_df, current_y):
+		from reportlab.platypus import Table, TableStyle
+		from reportlab.lib import colors as rl_colors
+		if comparison_df is None or comparison_df.empty:
+			return current_y
+
+		cs_sym = values.get("currency_symbol", "$")
+		display_factor = _display_conversion_factor(values)
+		rows = [["Maintenance Approach", "MRO Level", "Total Cost", "Cost/FH", "Avg Annual Cost"]]
+		for _, row in comparison_df.iterrows():
+			rows.append([
+				str(row.get("Maintenance Approach", "")),
+				str(row.get("MRO Level", "")),
+				f"{cs_sym}{float(row.get('Total Cost', 0.0)) * display_factor:,.0f}",
+				f"{cs_sym}{float(row.get('Cost/FH', 0.0)) * display_factor:,.2f}",
+				f"{cs_sym}{float(row.get('Annual Avg Cost', 0.0)) * display_factor:,.0f}",
+			])
+
+		col_widths = [150, 60, 95, 75, 95]
+		tbl = Table(rows, colWidths=col_widths)
+		tbl.setStyle(TableStyle([
+			("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor("#1a4b7c")),
+			("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white),
+			("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+			("FONTSIZE", (0, 0), (-1, -1), 7),
+			("GRID", (0, 0), (-1, -1), 0.5, rl_colors.HexColor("#aaaaaa")),
+			("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor("#f2f6fb")]),
+			("TOPPADDING", (0, 0), (-1, -1), 3),
+			("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+			("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+		]))
+		tw, th = tbl.wrapOn(pdf, page_width - 2 * margin, page_height)
+		current_y = ensure_space(current_y, th + 20)
+		pdf.setFont("Helvetica-Bold", 10)
+		pdf.drawString(margin, current_y, "MRO Capability Level Cost Comparison")
+		current_y -= 14
+		tbl.drawOn(pdf, margin, current_y - th)
+		return current_y - th - 10
+
 	mro_staffing_for_pdf = _compute_mro_staffing(values)
 	for section_title, section_lines in sections:
-		if section_title in ("Costings", "MRO Manpower Planning"):
+		if section_title in ("Costings", "MRO Capability Levels Comparison", "MRO Manpower Planning"):
 			pdf.showPage()
 			draw_page_header()
 			y = page_height - 120
@@ -1165,6 +1378,11 @@ def _build_pdf_report(values):
 			y -= 4
 			y = draw_chart_in_pdf(costings_fh_cost_fig, y)
 			y = draw_chart_in_pdf(overheads_fh_cost_fig, y)
+		if section_title == "MRO Capability Levels Comparison":
+			y -= 4
+			y = draw_mro_comparison_table_in_pdf(mro_comparison_df, y)
+			y = draw_chart_in_pdf(mro_comparison_total_fig, y)
+			y = draw_chart_in_pdf(mro_comparison_fh_fig, y)
 		if section_title == "MRO Manpower Planning":
 			y = draw_mro_table_in_pdf(mro_staffing_for_pdf, y)
 		y -= 8
@@ -2109,41 +2327,13 @@ for i, tab in enumerate(selected_tab):
 				"Escalation and geographic contingency are applied in the same way as other customer-facing costs."
 			)
 			with st.expander("Operating Cost Inputs", expanded=True):
+				# Build preset profiles from the centralized function
+				mro_level_presets = _get_mro_level_presets()
 				preset_profiles = {
 					"Custom": None,
-					"Lean MRO": {
-						"mro_cost_insurance": {"fixed": 30000.0, "per_ac": 2500.0},
-						"mro_cost_facility": {"fixed": 120000.0, "per_ac": 5000.0},
-						"mro_cost_gse": {"fixed": 20000.0, "per_ac": 2100.0},
-						"mro_cost_tooling": {"fixed": 40000.0, "per_ac": 2500.0},
-						"mro_cost_engine_bay": {"fixed": 25000.0, "per_ac": 2500.0},
-						"mro_cost_rotables_store": {"fixed": 12000.0, "per_ac": 1500.0},
-						"mro_cost_parts_store": {"fixed": 16000.0, "per_ac": 2000.0},
-						"mro_cost_utilities": {"fixed": 20000.0, "per_ac": 2500.0},
-						"mro_cost_it_quality": {"fixed": 18000.0, "per_ac": 2250.0},
-					},
-					"Standard MRO": {
-						"mro_cost_insurance": {"fixed": 50000.0, "per_ac": 3333.0},
-						"mro_cost_facility": {"fixed": 180000.0, "per_ac": 11667.0},
-						"mro_cost_gse": {"fixed": 35000.0, "per_ac": 4167.0},
-						"mro_cost_tooling": {"fixed": 80000.0, "per_ac": 5000.0},
-						"mro_cost_engine_bay": {"fixed": 60000.0, "per_ac": 5000.0},
-						"mro_cost_rotables_store": {"fixed": 30000.0, "per_ac": 3750.0},
-						"mro_cost_parts_store": {"fixed": 35000.0, "per_ac": 5000.0},
-						"mro_cost_utilities": {"fixed": 40000.0, "per_ac": 5000.0},
-						"mro_cost_it_quality": {"fixed": 38000.0, "per_ac": 3500.0},
-					},
-					"Full Capability MRO": {
-						"mro_cost_insurance": {"fixed": 70000.0, "per_ac": 5000.0},
-						"mro_cost_facility": {"fixed": 260000.0, "per_ac": 20000.0},
-						"mro_cost_gse": {"fixed": 60000.0, "per_ac": 7500.0},
-						"mro_cost_tooling": {"fixed": 140000.0, "per_ac": 10000.0},
-						"mro_cost_engine_bay": {"fixed": 110000.0, "per_ac": 10000.0},
-						"mro_cost_rotables_store": {"fixed": 65000.0, "per_ac": 6666.0},
-						"mro_cost_parts_store": {"fixed": 80000.0, "per_ac": 8333.0},
-						"mro_cost_utilities": {"fixed": 70000.0, "per_ac": 8333.0},
-						"mro_cost_it_quality": {"fixed": 70000.0, "per_ac": 5833.0},
-					},
+					"Lean MRO": mro_level_presets["Lean"],
+					"Standard MRO": mro_level_presets["Standard"],
+					"Full Capability MRO": mro_level_presets["Full"],
 				}
 				preset_col1, preset_col2 = st.columns([3, 1])
 				with preset_col1:
@@ -2660,6 +2850,131 @@ for i, tab in enumerate(selected_tab):
 				"Direct headcount is derived from modelled maintenance hours ÷ productive hours per person. "
 				"QC, Parts/Logistics and Planning roles are additional to direct maintenance staff."
 			)
+
+			# MRO Levels Comparison
+			st.markdown("---")
+			st.subheader("MRO Capability Levels Comparison")
+			st.caption(
+				"Compare total contract costs across the three MRO capability levels (Lean, Standard, Full) "
+				"for each maintenance approach. This helps identify the cost impact of different MRO investment levels."
+			)
+
+			try:
+				mro_comparison_df = _calculate_mro_levels_comparison(sidebar_values)
+
+				# Create pivot table for easier viewing
+				display_factor = _display_conversion_factor(sidebar_values)
+				currency_symbol = sidebar_values.get("currency_symbol", "$")
+
+				# Create summary table - Total Cost by Maintenance Approach and MRO Level
+				cost_pivot = mro_comparison_df.pivot_table(
+					values="Total Cost",
+					index="MRO Level",
+					columns="Maintenance Approach",
+					aggfunc="first"
+				)
+				cost_per_fh_pivot = mro_comparison_df.pivot_table(
+					values="Cost/FH",
+					index="MRO Level",
+					columns="Maintenance Approach",
+					aggfunc="first"
+				)
+				annual_cost_pivot = mro_comparison_df.pivot_table(
+					values="Annual Avg Cost",
+					index="MRO Level",
+					columns="Maintenance Approach",
+					aggfunc="first"
+				)
+
+				# Display tables
+				col1, col2 = st.columns(2)
+
+				with col1:
+					st.write("**Total Contract Cost**")
+					cost_display = cost_pivot * display_factor
+					st.dataframe(
+						cost_display.map(lambda x: f"{currency_symbol}{x:,.0f}" if pd.notna(x) else ""),
+						use_container_width=True,
+					)
+
+				with col2:
+					st.write("**Cost per Flight Hour**")
+					cost_fh_display = cost_per_fh_pivot * display_factor
+					st.dataframe(
+						cost_fh_display.map(lambda x: f"{currency_symbol}{x:,.2f}" if pd.notna(x) else ""),
+						use_container_width=True,
+					)
+
+				st.write("**Average Annual Cost**")
+				annual_display = annual_cost_pivot * display_factor
+				st.dataframe(
+					annual_display.map(lambda x: f"{currency_symbol}{x:,.0f}" if pd.notna(x) else ""),
+					use_container_width=True,
+				)
+
+				# Create visualization
+				fig = go.Figure()
+
+				# Reorder for better visualization
+				mro_order = ["Lean", "Standard", "Full"]
+				mro_comparison_df["MRO Level"] = pd.Categorical(
+					mro_comparison_df["MRO Level"],
+					categories=mro_order,
+					ordered=True
+				)
+				mro_comparison_df_sorted = mro_comparison_df.sort_values("MRO Level")
+
+				# Create grouped bar chart
+				for approach in mro_comparison_df_sorted["Maintenance Approach"].unique():
+					approach_data = mro_comparison_df_sorted[mro_comparison_df_sorted["Maintenance Approach"] == approach]
+					fig.add_trace(go.Bar(
+						x=approach_data["MRO Level"],
+						y=approach_data["Total Cost"] * display_factor,
+						name=approach,
+						text=[f"{currency_symbol}{v * display_factor:,.0f}" for v in approach_data["Total Cost"]],
+						textposition="outside",
+						hovertemplate="<b>%{name}</b><br>MRO Level: %{x}<br>Total Cost: " + currency_symbol + "%{y:,.0f}<extra></extra>"
+					))
+
+				fig.update_layout(
+					title="Total Contract Cost by MRO Level and Maintenance Approach",
+					xaxis_title="MRO Capability Level",
+					yaxis_title=f"Total Contract Cost ({currency_symbol})",
+					barmode="group",
+					height=500,
+					hovermode="x unified",
+					template="plotly_white",
+				)
+
+				st.plotly_chart(fig, use_container_width=True, config=_plotly_export_config("MRO_Levels_Comparison"))
+
+				# Cost per FH chart
+				fig2 = go.Figure()
+				for approach in mro_comparison_df_sorted["Maintenance Approach"].unique():
+					approach_data = mro_comparison_df_sorted[mro_comparison_df_sorted["Maintenance Approach"] == approach]
+					fig2.add_trace(go.Bar(
+						x=approach_data["MRO Level"],
+						y=approach_data["Cost/FH"] * display_factor,
+						name=approach,
+						text=[f"{currency_symbol}{v * display_factor:,.2f}" for v in approach_data["Cost/FH"]],
+						textposition="outside",
+						hovertemplate="<b>%{name}</b><br>MRO Level: %{x}<br>Cost/FH: " + currency_symbol + "%{y:,.2f}<extra></extra>"
+					))
+
+				fig2.update_layout(
+					title="Cost per Flight Hour by MRO Level and Maintenance Approach",
+					xaxis_title="MRO Capability Level",
+					yaxis_title=f"Cost/FH ({currency_symbol})",
+					barmode="group",
+					height=500,
+					hovermode="x unified",
+					template="plotly_white",
+				)
+
+				st.plotly_chart(fig2, use_container_width=True, config=_plotly_export_config("MRO_Levels_Cost_FH"))
+
+			except Exception as e:
+				st.error(f"Error calculating MRO levels comparison: {str(e)}")
 
 		elif tabs[i] == "Event Library":
 			st.header("Event Library")
