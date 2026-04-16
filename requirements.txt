@@ -1,6 +1,6 @@
 streamlit
 pandas
-plotly
-kaleido
+plotly==5.24.1
+kaleido==0.2.1
 reportlab
 requests
