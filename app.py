@@ -15,6 +15,7 @@ import plotly.graph_objects as go
 from io import BytesIO
 from urllib.parse import quote
 import math
+import concurrent.futures
 
 # Import sidebar component
 from ui.sidebar import show_sidebar
@@ -1326,12 +1327,22 @@ def _build_pdf_report(values):
 	draw_page_header()
 	y = page_height - 120
 
+	def _fig_to_image_timeout(fig, timeout_secs=20):
+		"""Export fig to PNG bytes with a hard timeout; returns None on timeout or error."""
+		with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _executor:
+			_future = _executor.submit(fig.to_image, format="png", width=1400, height=800, scale=2)
+			try:
+				return _future.result(timeout=timeout_secs)
+			except concurrent.futures.TimeoutError:
+				return None
+			except Exception:
+				return None
+
 	def draw_chart_in_pdf(fig, current_y):
 		if fig is None:
 			return current_y
-		try:
-			img_bytes = fig.to_image(format="png", width=1400, height=800, scale=2)
-		except Exception:
+		img_bytes = _fig_to_image_timeout(fig)
+		if img_bytes is None:
 			current_y = ensure_space(current_y, 14)
 			pdf.setFont("Helvetica-Oblique", 9)
 			pdf.drawString(margin, current_y, "Chart export unavailable in this environment (install kaleido for Plotly image rendering).")
