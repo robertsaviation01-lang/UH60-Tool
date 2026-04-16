@@ -1298,11 +1298,21 @@ def _build_pdf_report(values):
 			return page_height - 110
 		return current_y
 
-	sections = _build_report_sections(values)
-	maintenance_schedule_fig = _build_maintenance_schedule_figure(values)
-	maintenance_timeline_fig = _build_maintenance_timeline_figure(values)
-	costings_fh_cost_fig = _build_costings_fh_cost_figure(values)
-	overheads_fh_cost_fig = _build_overheads_fh_cost_figure(values)
+	def safe_build_figure(builder_fn):
+		try:
+			return builder_fn(values)
+		except Exception:
+			return None
+
+	try:
+		sections = _build_report_sections(values)
+	except Exception as exc:
+		sections = [("Dashboard", [f"Report content generation failed: {exc}"])]
+
+	maintenance_schedule_fig = safe_build_figure(_build_maintenance_schedule_figure)
+	maintenance_timeline_fig = safe_build_figure(_build_maintenance_timeline_figure)
+	costings_fh_cost_fig = safe_build_figure(_build_costings_fh_cost_figure)
+	overheads_fh_cost_fig = safe_build_figure(_build_overheads_fh_cost_figure)
 	mro_comparison_df = pd.DataFrame()
 	mro_comparison_total_fig = None
 	mro_comparison_fh_fig = None
@@ -1548,6 +1558,10 @@ def _render_print_report_actions(values):
 	except ModuleNotFoundError:
 		st.warning("PDF reporting is unavailable because the ReportLab package is not installed in the Python environment used by Streamlit.")
 		st.info("Install it in the interpreter running the app with: .venv\\Scripts\\python.exe -m pip install reportlab")
+		return
+	except Exception as exc:
+		st.error("Unable to generate PDF report with current inputs.")
+		st.exception(exc)
 		return
 	pdf_b64 = base64.b64encode(report_pdf).decode("utf-8")
 
