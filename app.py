@@ -1209,9 +1209,11 @@ def _build_pdf_report(values):
 	mro_comparison_df = pd.DataFrame()
 	mro_comparison_total_fig = None
 	mro_comparison_fh_fig = None
+	mro_comparison_error = None
 	try:
 		mro_comparison_df, mro_comparison_total_fig, mro_comparison_fh_fig = _build_mro_levels_comparison_charts(values)
-	except Exception:
+	except Exception as exc:
+		mro_comparison_error = str(exc)
 		mro_comparison_df = pd.DataFrame()
 	draw_page_header()
 	y = page_height - 120
@@ -1355,7 +1357,7 @@ def _build_pdf_report(values):
 
 	mro_staffing_for_pdf = _compute_mro_staffing(values)
 	for section_title, section_lines in sections:
-		if section_title in ("Costings", "MRO Capability Levels Comparison", "MRO Manpower Planning"):
+		if section_title in ("Costings", "MRO Manpower Planning"):
 			pdf.showPage()
 			draw_page_header()
 			y = page_height - 120
@@ -1378,14 +1380,40 @@ def _build_pdf_report(values):
 			y -= 4
 			y = draw_chart_in_pdf(costings_fh_cost_fig, y)
 			y = draw_chart_in_pdf(overheads_fh_cost_fig, y)
-		if section_title == "MRO Capability Levels Comparison":
-			y -= 4
-			y = draw_mro_comparison_table_in_pdf(mro_comparison_df, y)
-			y = draw_chart_in_pdf(mro_comparison_total_fig, y)
-			y = draw_chart_in_pdf(mro_comparison_fh_fig, y)
 		if section_title == "MRO Manpower Planning":
 			y = draw_mro_table_in_pdf(mro_staffing_for_pdf, y)
 		y -= 8
+
+	# Always render a dedicated MRO comparison page in the PDF so print/download includes the table and graphs.
+	pdf.showPage()
+	draw_page_header()
+	y = page_height - 120
+	pdf.setFont("Helvetica-Bold", 13)
+	pdf.drawString(margin, y, "MRO Capability Levels Comparison")
+	y -= 18
+	pdf.setFont("Helvetica", 9)
+	if mro_comparison_error:
+		y = ensure_space(y, 12)
+		pdf.drawString(margin, y, f"Unable to calculate MRO comparison charts: {mro_comparison_error}")
+		y -= 12
+	if mro_comparison_df.empty:
+		y = ensure_space(y, 12)
+		pdf.drawString(margin, y, "No MRO capability comparison data available for current inputs.")
+		y -= 12
+	else:
+		y = draw_mro_comparison_table_in_pdf(mro_comparison_df, y)
+		if mro_comparison_total_fig is not None:
+			y = draw_chart_in_pdf(mro_comparison_total_fig, y)
+		else:
+			y = ensure_space(y, 12)
+			pdf.drawString(margin, y, "Total Cost comparison graph unavailable.")
+			y -= 12
+		if mro_comparison_fh_fig is not None:
+			y = draw_chart_in_pdf(mro_comparison_fh_fig, y)
+		else:
+			y = ensure_space(y, 12)
+			pdf.drawString(margin, y, "Cost/FH comparison graph unavailable.")
+			y -= 12
 
 	pdf.save()
 	buffer.seek(0)
