@@ -1890,6 +1890,12 @@ for i, tab in enumerate(selected_tab):
 				"Forecast Parts Cost": forecast_parts,
 				"Forecast Downtime": forecast_downtime
 			})
+			summary_table["Total Events"] = (
+				pd.to_numeric(summary_table["Total Events"], errors="coerce")
+				.fillna(0)
+				.round(0)
+				.astype(int)
+			)
 			# Only show events with Total Events > 0
 			summary_table = summary_table[summary_table["Total Events"] > 0].reset_index(drop=True)
 
