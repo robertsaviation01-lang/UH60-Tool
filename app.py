@@ -1475,7 +1475,7 @@ def _build_pdf_report(values):
 		y -= 8
 
 	if not is_parts_only_mode:
-		# Always render a dedicated MRO comparison page in the PDF so print/download includes the table and graphs.
+		# Always render a dedicated MRO comparison page in the PDF.
 		pdf.showPage()
 		draw_page_header()
 		y = page_height - 120
@@ -1493,18 +1493,11 @@ def _build_pdf_report(values):
 			y -= 12
 		else:
 			y = draw_mro_comparison_table_in_pdf(mro_comparison_df, y)
-			if mro_comparison_total_fig is not None:
-				y = draw_chart_in_pdf(mro_comparison_total_fig, y)
-			else:
-				y = ensure_space(y, 12)
-				pdf.drawString(margin, y, "Total Cost comparison graph unavailable.")
-				y -= 12
-			if mro_comparison_fh_fig is not None:
-				y = draw_chart_in_pdf(mro_comparison_fh_fig, y)
-			else:
-				y = ensure_space(y, 12)
-				pdf.drawString(margin, y, "Cost/FH comparison graph unavailable.")
-				y -= 12
+			y = ensure_space(y, 12)
+			pdf.setFont("Helvetica-Oblique", 9)
+			pdf.drawString(margin, y, "Interactive comparison graphs are available in the app; the PDF includes the comparison table only.")
+			y -= 12
+			pdf.setFont("Helvetica", 9)
 
 	pdf.save()
 	buffer.seek(0)
