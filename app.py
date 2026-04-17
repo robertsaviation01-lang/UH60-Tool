@@ -2655,6 +2655,24 @@ for i, tab in enumerate(selected_tab):
 			contingency_multiplier = float(sidebar_values.get("geographic_contingency_multiplier", 1.0))
 			annual_management_fee = float(sidebar_values.get("annual_management_fee_per_ac", 0.0)) * fleet_size
 			labour_rate = float(sidebar_values.get("labour_rate", 0.0))
+			labour_cost = float(sidebar_values.get("labour_cost", 0.0))
+			costings_summary_df = costings_df.copy()
+			if is_parts_only_mode and parts_mode_package is not None and not costings_summary_df.empty:
+				escalation_rate = float(sidebar_values.get("annual_escalation", 0.0)) / 100.0
+				productive_hours = int(sidebar_values.get("mp_productive_hrs", 1500))
+				for contract_year in costings_summary_df["Contract Year"].dropna().astype(int).tolist():
+					esc_multiplier = (1 + escalation_rate) ** (contract_year - 1) if apply_escalation else 1.0
+					annual_coordinator_hours = float(productive_hours)
+					annual_coordinator_charge = annual_coordinator_hours * labour_rate * contingency_multiplier * esc_multiplier
+					year_mask = costings_summary_df["Contract Year"] == contract_year
+					costings_summary_df.loc[year_mask, "Manpower Hrs"] = annual_coordinator_hours
+					costings_summary_df.loc[year_mask, "Manpower Cost"] = annual_coordinator_charge
+				if "Total Cost" in costings_summary_df.columns:
+					total_cost_columns = [
+						col for col in ["Manpower Cost", "Parts Cost", "Management Fee", "MRO Overheads"]
+						if col in costings_summary_df.columns
+					]
+					costings_summary_df["Total Cost"] = costings_summary_df[total_cost_columns].sum(axis=1)
 			overhead_categories = [label for label, _ in _mro_overhead_categories()]
 			cost_columns = [
 				"Manpower Cost",
@@ -2663,12 +2681,12 @@ for i, tab in enumerate(selected_tab):
 				"MRO Overheads",
 				"Total Cost",
 			] + [c for c in overhead_categories if c in costings_df.columns]
-			annual_costings_display_df = costings_df.copy()
+			annual_costings_display_df = costings_summary_df.copy()
 			currency_cols_in_display = [col for col in cost_columns if col in annual_costings_display_df.columns]
 			if currency_cols_in_display:
 				annual_costings_display_df[currency_cols_in_display] = annual_costings_display_df[currency_cols_in_display] * display_factor
 			numeric_cols = annual_costings_display_df.select_dtypes(include=["number"]).columns.tolist()
-			contract_fh_total_for_table = float(costings_df["Total FH"].sum()) if "Total FH" in costings_df.columns else 0.0
+			contract_fh_total_for_table = float(costings_summary_df["Total FH"].sum()) if "Total FH" in costings_summary_df.columns else 0.0
 			if contract_fh_total_for_table > 0:
 				fh_cost_row = {
 					"Contract Year": float("nan"),
@@ -2677,7 +2695,7 @@ for i, tab in enumerate(selected_tab):
 				for col in numeric_cols:
 					if col == "Contract Year":
 						continue
-					fh_cost_row[col] = float(costings_df[col].sum()) / contract_fh_total_for_table
+					fh_cost_row[col] = float(costings_summary_df[col].sum()) / contract_fh_total_for_table
 				annual_costings_display_df = pd.concat([annual_costings_display_df, pd.DataFrame([fh_cost_row])], ignore_index=True)
 			if numeric_cols:
 				annual_costings_display_df[numeric_cols] = annual_costings_display_df[numeric_cols].round(0)
@@ -2691,10 +2709,10 @@ for i, tab in enumerate(selected_tab):
 			)
 			if contract_fh_total_for_table > 0:
 				component_items = ["Manpower Cost", "Parts Cost", "Management Fee", "MRO Overheads"]
-				present_components = [item for item in component_items if item in costings_df.columns]
+				present_components = [item for item in component_items if item in costings_summary_df.columns]
 				if present_components:
 					component_values = [
-						(float(costings_df[item].sum()) / contract_fh_total_for_table) * display_factor
+						(float(costings_summary_df[item].sum()) / contract_fh_total_for_table) * display_factor
 						for item in present_components
 					]
 					line_x = present_components + ["Total Cost"]
@@ -2789,36 +2807,36 @@ for i, tab in enumerate(selected_tab):
 					)
 
 			c1, c2, c3, c4 = st.columns(4)
-			contract_fh_total = costings_df["Total FH"].sum()
-			contract_manpower_hours_total = costings_df["Manpower Hrs"].sum()
+			contract_fh_total = costings_summary_df["Total FH"].sum()
+			contract_manpower_hours_total = costings_summary_df["Manpower Hrs"].sum()
 			display_contract_manpower_hours_total = contract_manpower_hours_total
 			if is_parts_only_mode and parts_mode_package is not None:
 				display_contract_manpower_hours_total = float(parts_mode_package["coordinator_contract_hours"])
-			manpower_cost_per_fh = (costings_df["Manpower Cost"].sum() / contract_fh_total) if contract_fh_total > 0 else 0.0
-			parts_cost_per_fh = (costings_df["Parts Cost"].sum() / contract_fh_total) if contract_fh_total > 0 else 0.0
-			overheads_cost_per_fh = (costings_df["MRO Overheads"].sum() / contract_fh_total) if contract_fh_total > 0 else 0.0
-			contract_management_fee = float(costings_df["Management Fee"].sum()) if "Management Fee" in costings_df.columns else (annual_management_fee * n_years)
+			contract_manpower_cost = float(costings_summary_df["Manpower Cost"].sum()) if "Manpower Cost" in costings_summary_df.columns else 0.0
+			manpower_cost_per_fh = (contract_manpower_cost / contract_fh_total) if contract_fh_total > 0 else 0.0
+			parts_cost_per_fh = (costings_summary_df["Parts Cost"].sum() / contract_fh_total) if contract_fh_total > 0 else 0.0
+			overheads_cost_per_fh = (costings_summary_df["MRO Overheads"].sum() / contract_fh_total) if contract_fh_total > 0 else 0.0
+			contract_management_fee = float(costings_summary_df["Management Fee"].sum()) if "Management Fee" in costings_summary_df.columns else (annual_management_fee * n_years)
 			annual_management_fee = (contract_management_fee / n_years) if n_years > 0 else 0.0
 			management_fee_per_fh = (contract_management_fee / contract_fh_total) if contract_fh_total > 0 else 0.0
-			contract_overheads = float(costings_df["MRO Overheads"].sum())
+			contract_overheads = float(costings_summary_df["MRO Overheads"].sum())
 			annual_overheads = contract_overheads / n_years if n_years > 0 else 0.0
-			labour_cost = float(sidebar_values.get("labour_cost", 0.0))
 			contract_manpower_cost_delta = (labour_rate - labour_cost) * contract_manpower_hours_total * contingency_multiplier
-			manpower_delta_per_fh = (((labour_rate - labour_cost) * contract_manpower_hours_total * contingency_multiplier) / contract_fh_total) if contract_fh_total > 0 else 0.0
+			manpower_delta_per_fh = (contract_manpower_cost_delta / contract_fh_total) if contract_fh_total > 0 else 0.0
 			with c1:
-				st.metric("Contract FH", f"{costings_df['Total FH'].sum():.0f}")
+				st.metric("Contract FH", f"{costings_summary_df['Total FH'].sum():.0f}")
 				st.metric("Contract Management Fee", f"{sidebar_values['currency_symbol']}{(contract_management_fee * display_factor):,.0f}")
 				st.metric("Annual Management Fee", f"{sidebar_values['currency_symbol']}{(annual_management_fee * display_factor):,.0f}")
 				st.metric("Management Fee / FH", f"{sidebar_values['currency_symbol']}{(management_fee_per_fh * display_factor):,.0f}")
 			with c2:
 				st.metric("Contract Manpower Hrs", f"{display_contract_manpower_hours_total:.0f}")
 			with c3:
-				st.metric("Contract Manpower Cost", f"{sidebar_values['currency_symbol']}{(costings_df['Manpower Cost'].sum() * display_factor):,.0f}")
+				st.metric("Contract Manpower Cost", f"{sidebar_values['currency_symbol']}{(contract_manpower_cost * display_factor):,.0f}")
 				st.metric("Contract Manpower Cost Delta", f"{sidebar_values['currency_symbol']}{(contract_manpower_cost_delta * display_factor):,.0f}")
 				st.metric("Manpower Cost / FH", f"{sidebar_values['currency_symbol']}{(manpower_cost_per_fh * display_factor):,.0f}")
 				st.metric("Manpower Delta /FH", f"{sidebar_values['currency_symbol']}{(manpower_delta_per_fh * display_factor):,.0f}")
 			with c4:
-				st.metric("Contract Parts Cost", f"{sidebar_values['currency_symbol']}{(costings_df['Parts Cost'].sum() * display_factor):,.0f}")
+				st.metric("Contract Parts Cost", f"{sidebar_values['currency_symbol']}{(costings_summary_df['Parts Cost'].sum() * display_factor):,.0f}")
 				st.metric("Parts Cost /FH", f"{sidebar_values['currency_symbol']}{(parts_cost_per_fh * display_factor):,.0f}")
 				st.metric("Contract MRO Overheads", f"{sidebar_values['currency_symbol']}{(contract_overheads * display_factor):,.0f}")
 				st.metric("Annual MRO Overheads", f"{sidebar_values['currency_symbol']}{(annual_overheads * display_factor):,.0f}")
