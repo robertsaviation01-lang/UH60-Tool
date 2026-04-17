@@ -905,7 +905,6 @@ def _compute_parts_supply_only_contract_package(values, costings_df=None, apply_
 	escalation_rate = float(values.get("annual_escalation", 0.0)) / 100.0
 	contingency_multiplier = 1.0 + (float(values.get("geographic_contingency_pct", 0.0)) / 100.0)
 	productive_hours = int(values.get("mp_productive_hrs", 1500))
-	labour_rate = float(values.get("labour_rate", 0.0))
 
 	parts_total = float(costings_df["Parts Cost"].sum()) if "Parts Cost" in costings_df.columns else 0.0
 	management_fee_total = float(costings_df["Management Fee"].sum()) if "Management Fee" in costings_df.columns else 0.0
@@ -920,11 +919,9 @@ def _compute_parts_supply_only_contract_package(values, costings_df=None, apply_
 			esc = (1 + escalation_rate) ** y if apply_escalation else 1.0
 			rotables_store_total += base_rotables * esc
 
-	coordinator_annual_charge_base = productive_hours * labour_rate * contingency_multiplier
-	coordinator_contract_charge = 0.0
-	for y in range(contract_years):
-		esc = (1 + escalation_rate) ** y if apply_escalation else 1.0
-		coordinator_contract_charge += coordinator_annual_charge_base * esc
+	# Business rule: Parts Supply Only uses a flat annual coordinator cost.
+	coordinator_annual_charge_base = 100000.0
+	coordinator_contract_charge = coordinator_annual_charge_base * contract_years
 	coordinator_contract_hours = float(productive_hours * contract_years)
 
 	total_contract_cost = parts_total + rotables_store_total + management_fee_total + coordinator_contract_charge
@@ -936,6 +933,7 @@ def _compute_parts_supply_only_contract_package(values, costings_df=None, apply_
 		"parts_total": parts_total,
 		"rotables_store_total": rotables_store_total,
 		"management_fee_total": management_fee_total,
+		"coordinator_annual_charge": coordinator_annual_charge_base,
 		"coordinator_contract_charge": coordinator_contract_charge,
 		"coordinator_contract_hours": coordinator_contract_hours,
 		"contract_fh_total": contract_fh_total,
@@ -3026,12 +3024,10 @@ for i, tab in enumerate(selected_tab):
 			labour_cost = float(sidebar_values.get("labour_cost", 0.0))
 			costings_summary_df = costings_df.copy()
 			if is_parts_only_mode and parts_mode_package is not None and not costings_summary_df.empty:
-				escalation_rate = float(sidebar_values.get("annual_escalation", 0.0)) / 100.0
 				productive_hours = int(sidebar_values.get("mp_productive_hrs", 1500))
+				annual_coordinator_charge = float(parts_mode_package.get("coordinator_annual_charge", 100000.0))
 				for contract_year in costings_summary_df["Contract Year"].dropna().astype(int).tolist():
-					esc_multiplier = (1 + escalation_rate) ** (contract_year - 1) if apply_escalation else 1.0
 					annual_coordinator_hours = float(productive_hours)
-					annual_coordinator_charge = annual_coordinator_hours * labour_rate * contingency_multiplier * esc_multiplier
 					year_mask = costings_summary_df["Contract Year"] == contract_year
 					costings_summary_df.loc[year_mask, "Manpower Hrs"] = annual_coordinator_hours
 					costings_summary_df.loc[year_mask, "Manpower Cost"] = annual_coordinator_charge
