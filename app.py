@@ -1340,7 +1340,10 @@ def _build_mro_levels_comparison_pdf_charts(values):
 	for idx, approach in enumerate(approaches):
 		approach_data = comparison_df[comparison_df["Maintenance Approach"] == approach].set_index("MRO Level").reindex(mro_order)
 		x_positions = [base + (idx - (len(approaches) - 1) / 2) * bar_width for base in x_base]
-		total_vals = [(0.0 if pd.isna(val) else float(val) * display_factor) for val in approach_data["Total Cost"].tolist()]
+		total_vals = [
+			(0.0 if pd.isna(val) else (float(val) * display_factor) / 1_000_000.0)
+			for val in approach_data["Total Cost"].tolist()
+		]
 		fh_vals = [(0.0 if pd.isna(val) else float(val) * display_factor) for val in approach_data["Cost/FH"].tolist()]
 		ax_total.bar(x_positions, total_vals, width=bar_width, label=approach, color=colors[idx % len(colors)])
 		ax_fh.bar(x_positions, fh_vals, width=bar_width, label=approach, color=colors[idx % len(colors)])
@@ -1349,7 +1352,7 @@ def _build_mro_levels_comparison_pdf_charts(values):
 	ax_total.set_xticklabels(mro_order)
 	ax_total.set_title("Total Contract Cost by MRO Level and Maintenance Approach")
 	ax_total.set_xlabel("MRO Capability Level")
-	ax_total.set_ylabel(f"Total Contract Cost ({currency_symbol})")
+	ax_total.set_ylabel(f"Total Contract Cost ({currency_symbol} Millions)")
 	ax_total.grid(axis="y", alpha=0.25)
 	ax_total.legend()
 
@@ -2842,141 +2845,155 @@ for i, tab in enumerate(selected_tab):
 		elif tabs[i] == "Costings":
 			st.header("Costings")
 			apply_escalation = st.toggle("Apply Annual Escalation", value=True, key="costings_escalation_toggle")
-			st.markdown("### MRO Operating Costs (Annual)")
-			st.caption(
-				"Add fixed annual costs to run the MRO capability. These are included in annual and contract totals. "
-				"Escalation and geographic contingency are applied in the same way as other customer-facing costs."
-			)
-			with st.expander("Operating Cost Inputs", expanded=True):
-				# Build preset profiles from the centralized function
-				mro_level_presets = _get_mro_level_presets()
-				preset_profiles = {
-					"Custom": None,
-					"Lean MRO": mro_level_presets["Lean"],
-					"Standard MRO": mro_level_presets["Standard"],
-					"Full Capability MRO": mro_level_presets["Full"],
-				}
-				preset_col1, preset_col2 = st.columns([3, 1])
-				with preset_col1:
-					selected_preset = st.selectbox(
-						"Overhead preset",
-						list(preset_profiles.keys()),
-						index=0,
-						key="mro_overhead_preset_select",
-						help="Choose a baseline profile and click Load Preset to populate all annual overhead fields.",
-					)
-					scale_preset_with_fleet = st.toggle(
-						"Scale preset with fleet size",
-						value=True,
-						key="mro_overhead_preset_scale_toggle",
-						help="If enabled, each category uses Fixed + (Per-Aircraft x Fleet Size).",
-					)
-				with preset_col2:
-					st.write("")
-					st.write("")
-					if st.button("Load Preset", key="load_mro_overhead_preset"):
-						selected_values = preset_profiles.get(selected_preset)
-						if selected_values:
-							for preset_key, components in selected_values.items():
-								fixed_component = float(components.get("fixed", 0.0))
-								per_ac_component = float(components.get("per_ac", 0.0))
-								if scale_preset_with_fleet:
-									preset_value = fixed_component + (per_ac_component * float(sidebar_values.get("fleet_size", 1)))
-								else:
-									reference_fleet = 12.0
-									preset_value = fixed_component + (per_ac_component * reference_fleet)
-								st.session_state[preset_key] = float(preset_value)
-							st.success(f"Loaded preset: {selected_preset}")
-							st.rerun()
-				preset_values = preset_profiles.get(selected_preset)
-				if preset_values:
-					if scale_preset_with_fleet:
-						preview_total = sum(
-							float(v.get("fixed", 0.0)) + (float(v.get("per_ac", 0.0)) * float(sidebar_values.get("fleet_size", 1)))
-							for v in preset_values.values()
-						)
-						preview_basis = f"fleet size {int(sidebar_values.get('fleet_size', 1))}"
-					else:
-						reference_fleet = 12.0
-						preview_total = sum(
-							float(v.get("fixed", 0.0)) + (float(v.get("per_ac", 0.0)) * reference_fleet)
-							for v in preset_values.values()
-						)
-						preview_basis = "reference fleet size 12"
-					display_factor_for_preview = _display_conversion_factor(sidebar_values)
-					st.caption(
-						f"Preset annual overhead total ({preview_basis}): "
-							f"{sidebar_values['currency_symbol']}{(preview_total * display_factor_for_preview):,.0f} "
-						"(before escalation and contingency)."
-					)
+			is_parts_only_mode = _is_parts_supply_only_mode(sidebar_values.get("maintenance_mode"))
+			mro_cost_insurance = float(st.session_state.get("mro_cost_insurance", 0.0))
+			mro_cost_facility = float(st.session_state.get("mro_cost_facility", 0.0))
+			mro_cost_gse = float(st.session_state.get("mro_cost_gse", 0.0))
+			mro_cost_tooling = float(st.session_state.get("mro_cost_tooling", 0.0))
+			mro_cost_engine_bay = float(st.session_state.get("mro_cost_engine_bay", 0.0))
+			mro_cost_rotables_store = float(st.session_state.get("mro_cost_rotables_store", 0.0))
+			mro_cost_parts_store = float(st.session_state.get("mro_cost_parts_store", 0.0))
+			mro_cost_utilities = float(st.session_state.get("mro_cost_utilities", 0.0))
+			mro_cost_it_quality = float(st.session_state.get("mro_cost_it_quality", 0.0))
 
-				o1, o2, o3 = st.columns(3)
-				with o1:
-					mro_cost_insurance = st.number_input(
-						"Insurance (USD/year)",
-						min_value=0.0,
-						value=float(st.session_state.get("mro_cost_insurance", 0.0)),
-						step=1000.0,
-						key="mro_cost_insurance",
-					)
-					mro_cost_facility = st.number_input(
-						"Facility Costs (USD/year)",
-						min_value=0.0,
-						value=float(st.session_state.get("mro_cost_facility", 0.0)),
-						step=1000.0,
-						key="mro_cost_facility",
-					)
-					mro_cost_gse = st.number_input(
-						"GSE (USD/year)",
-						min_value=0.0,
-						value=float(st.session_state.get("mro_cost_gse", 0.0)),
-						step=1000.0,
-						key="mro_cost_gse",
-					)
-				with o2:
-					mro_cost_tooling = st.number_input(
-						"UH-60 Specialist Tooling (USD/year)",
-						min_value=0.0,
-						value=float(st.session_state.get("mro_cost_tooling", 0.0)),
-						step=1000.0,
-						key="mro_cost_tooling",
-					)
-					mro_cost_engine_bay = st.number_input(
-						"Engine Bay (USD/year)",
-						min_value=0.0,
-						value=float(st.session_state.get("mro_cost_engine_bay", 0.0)),
-						step=1000.0,
-						key="mro_cost_engine_bay",
-					)
-					mro_cost_rotables_store = st.number_input(
-						"Rotables Store (USD/year)",
-						min_value=0.0,
-						value=float(st.session_state.get("mro_cost_rotables_store", 0.0)),
-						step=1000.0,
-						key="mro_cost_rotables_store",
-					)
-				with o3:
-					mro_cost_parts_store = st.number_input(
-						"Parts Store (USD/year)",
-						min_value=0.0,
-						value=float(st.session_state.get("mro_cost_parts_store", 0.0)),
-						step=1000.0,
-						key="mro_cost_parts_store",
-					)
-					mro_cost_utilities = st.number_input(
-						"Utilities (USD/year)",
-						min_value=0.0,
-						value=float(st.session_state.get("mro_cost_utilities", 0.0)),
-						step=1000.0,
-						key="mro_cost_utilities",
-					)
-					mro_cost_it_quality = st.number_input(
-						"IT/Quality/Compliance (USD/year)",
-						min_value=0.0,
-						value=float(st.session_state.get("mro_cost_it_quality", 0.0)),
-						step=1000.0,
-						key="mro_cost_it_quality",
-					)
+			if not is_parts_only_mode:
+				st.markdown("### MRO Operating Costs (Annual)")
+				st.caption(
+					"Add fixed annual costs to run the MRO capability. These are included in annual and contract totals. "
+					"Escalation and geographic contingency are applied in the same way as other customer-facing costs."
+				)
+				with st.expander("Operating Cost Inputs", expanded=True):
+					# Build preset profiles from the centralized function
+					mro_level_presets = _get_mro_level_presets()
+					preset_profiles = {
+						"Custom": None,
+						"Lean MRO": mro_level_presets["Lean"],
+						"Standard MRO": mro_level_presets["Standard"],
+						"Full Capability MRO": mro_level_presets["Full"],
+					}
+					preset_col1, preset_col2 = st.columns([3, 1])
+					with preset_col1:
+						selected_preset = st.selectbox(
+							"Overhead preset",
+							list(preset_profiles.keys()),
+							index=0,
+							key="mro_overhead_preset_select",
+							help="Choose a baseline profile and click Load Preset to populate all annual overhead fields.",
+						)
+						scale_preset_with_fleet = st.toggle(
+							"Scale preset with fleet size",
+							value=True,
+							key="mro_overhead_preset_scale_toggle",
+							help="If enabled, each category uses Fixed + (Per-Aircraft x Fleet Size).",
+						)
+					with preset_col2:
+						st.write("")
+						st.write("")
+						if st.button("Load Preset", key="load_mro_overhead_preset"):
+							selected_values = preset_profiles.get(selected_preset)
+							if selected_values:
+								for preset_key, components in selected_values.items():
+									fixed_component = float(components.get("fixed", 0.0))
+									per_ac_component = float(components.get("per_ac", 0.0))
+									if scale_preset_with_fleet:
+										preset_value = fixed_component + (per_ac_component * float(sidebar_values.get("fleet_size", 1)))
+									else:
+										reference_fleet = 12.0
+										preset_value = fixed_component + (per_ac_component * reference_fleet)
+									st.session_state[preset_key] = float(preset_value)
+								st.success(f"Loaded preset: {selected_preset}")
+								st.rerun()
+					preset_values = preset_profiles.get(selected_preset)
+					if preset_values:
+						if scale_preset_with_fleet:
+							preview_total = sum(
+								float(v.get("fixed", 0.0)) + (float(v.get("per_ac", 0.0)) * float(sidebar_values.get("fleet_size", 1)))
+								for v in preset_values.values()
+							)
+							preview_basis = f"fleet size {int(sidebar_values.get('fleet_size', 1))}"
+						else:
+							reference_fleet = 12.0
+							preview_total = sum(
+								float(v.get("fixed", 0.0)) + (float(v.get("per_ac", 0.0)) * reference_fleet)
+								for v in preset_values.values()
+							)
+							preview_basis = "reference fleet size 12"
+						display_factor_for_preview = _display_conversion_factor(sidebar_values)
+						st.caption(
+							f"Preset annual overhead total ({preview_basis}): "
+								f"{sidebar_values['currency_symbol']}{(preview_total * display_factor_for_preview):,.0f} "
+							"(before escalation and contingency)."
+						)
+
+					o1, o2, o3 = st.columns(3)
+					with o1:
+						mro_cost_insurance = st.number_input(
+							"Insurance (USD/year)",
+							min_value=0.0,
+							value=float(st.session_state.get("mro_cost_insurance", 0.0)),
+							step=1000.0,
+							key="mro_cost_insurance",
+						)
+						mro_cost_facility = st.number_input(
+							"Facility Costs (USD/year)",
+							min_value=0.0,
+							value=float(st.session_state.get("mro_cost_facility", 0.0)),
+							step=1000.0,
+							key="mro_cost_facility",
+						)
+						mro_cost_gse = st.number_input(
+							"GSE (USD/year)",
+							min_value=0.0,
+							value=float(st.session_state.get("mro_cost_gse", 0.0)),
+							step=1000.0,
+							key="mro_cost_gse",
+						)
+					with o2:
+						mro_cost_tooling = st.number_input(
+							"UH-60 Specialist Tooling (USD/year)",
+							min_value=0.0,
+							value=float(st.session_state.get("mro_cost_tooling", 0.0)),
+							step=1000.0,
+							key="mro_cost_tooling",
+						)
+						mro_cost_engine_bay = st.number_input(
+							"Engine Bay (USD/year)",
+							min_value=0.0,
+							value=float(st.session_state.get("mro_cost_engine_bay", 0.0)),
+							step=1000.0,
+							key="mro_cost_engine_bay",
+						)
+						mro_cost_rotables_store = st.number_input(
+							"Rotables Store (USD/year)",
+							min_value=0.0,
+							value=float(st.session_state.get("mro_cost_rotables_store", 0.0)),
+							step=1000.0,
+							key="mro_cost_rotables_store",
+						)
+					with o3:
+						mro_cost_parts_store = st.number_input(
+							"Parts Store (USD/year)",
+							min_value=0.0,
+							value=float(st.session_state.get("mro_cost_parts_store", 0.0)),
+							step=1000.0,
+							key="mro_cost_parts_store",
+						)
+						mro_cost_utilities = st.number_input(
+							"Utilities (USD/year)",
+							min_value=0.0,
+							value=float(st.session_state.get("mro_cost_utilities", 0.0)),
+							step=1000.0,
+							key="mro_cost_utilities",
+						)
+						mro_cost_it_quality = st.number_input(
+							"IT/Quality/Compliance (USD/year)",
+							min_value=0.0,
+							value=float(st.session_state.get("mro_cost_it_quality", 0.0)),
+							step=1000.0,
+							key="mro_cost_it_quality",
+						)
+			else:
+				st.caption("Parts Supply Only mode: only Parts Cost, Management Fee, and 1 x Parts / Logistics Coordinator costings are shown.")
 
 			costings_inputs = dict(sidebar_values)
 			costings_inputs.update({
@@ -2994,7 +3011,6 @@ for i, tab in enumerate(selected_tab):
 			costings_df = _build_costings_dataframe(costings_inputs, apply_escalation=apply_escalation)
 			display_factor = _display_conversion_factor(sidebar_values)
 			n_years = int(sidebar_values["years"])
-			is_parts_only_mode = _is_parts_supply_only_mode(sidebar_values.get("maintenance_mode"))
 			parts_mode_package = None
 			if is_parts_only_mode:
 				parts_mode_package = _compute_parts_supply_only_contract_package(
@@ -3021,19 +3037,23 @@ for i, tab in enumerate(selected_tab):
 					costings_summary_df.loc[year_mask, "Manpower Cost"] = annual_coordinator_charge
 				if "Total Cost" in costings_summary_df.columns:
 					total_cost_columns = [
-						col for col in ["Manpower Cost", "Parts Cost", "Management Fee", "MRO Overheads"]
+						col for col in ["Manpower Cost", "Parts Cost", "Management Fee"]
 						if col in costings_summary_df.columns
 					]
 					costings_summary_df["Total Cost"] = costings_summary_df[total_cost_columns].sum(axis=1)
 			overhead_categories = [label for label, _ in _mro_overhead_categories()]
-			cost_columns = [
-				"Manpower Cost",
-				"Parts Cost",
-				"Management Fee",
-				"MRO Overheads",
-				"Total Cost",
-			] + [c for c in overhead_categories if c in costings_df.columns]
-			annual_costings_display_df = costings_summary_df.copy()
+			if is_parts_only_mode:
+				cost_columns = ["Manpower Cost", "Parts Cost", "Management Fee", "Total Cost"]
+			else:
+				cost_columns = [
+					"Manpower Cost",
+					"Parts Cost",
+					"Management Fee",
+					"MRO Overheads",
+					"Total Cost",
+				] + [c for c in overhead_categories if c in costings_df.columns]
+			display_cols = ["Contract Year", "Period", "Total FH", "Manpower Hrs"] + [c for c in cost_columns if c in costings_summary_df.columns]
+			annual_costings_display_df = costings_summary_df[display_cols].copy()
 			currency_cols_in_display = [col for col in cost_columns if col in annual_costings_display_df.columns]
 			if currency_cols_in_display:
 				annual_costings_display_df[currency_cols_in_display] = annual_costings_display_df[currency_cols_in_display] * display_factor
@@ -3060,7 +3080,7 @@ for i, tab in enumerate(selected_tab):
 				}, na_rep="")
 			)
 			if contract_fh_total_for_table > 0:
-				component_items = ["Manpower Cost", "Parts Cost", "Management Fee", "MRO Overheads"]
+				component_items = ["Manpower Cost", "Parts Cost", "Management Fee"] if is_parts_only_mode else ["Manpower Cost", "Parts Cost", "Management Fee", "MRO Overheads"]
 				present_components = [item for item in component_items if item in costings_summary_df.columns]
 				if present_components:
 					component_values = [
@@ -3104,7 +3124,7 @@ for i, tab in enumerate(selected_tab):
 						config=_plotly_export_config("annual_costings_fh_cost_by_item"),
 					)
 			overhead_cols_present = [c for c in overhead_categories if c in costings_df.columns]
-			if overhead_cols_present:
+			if (not is_parts_only_mode) and overhead_cols_present:
 				st.markdown("#### Annual MRO Overheads Breakdown")
 				st.caption("USD calculation base; values shown in selected display currency using current FX rate.")
 				overhead_breakdown_df = costings_df[["Contract Year", "Period"] + overhead_cols_present + ["MRO Overheads"]]
@@ -3190,9 +3210,22 @@ for i, tab in enumerate(selected_tab):
 			with c4:
 				st.metric("Contract Parts Cost", f"{sidebar_values['currency_symbol']}{(costings_summary_df['Parts Cost'].sum() * display_factor):,.0f}")
 				st.metric("Parts Cost /FH", f"{sidebar_values['currency_symbol']}{(parts_cost_per_fh * display_factor):,.0f}")
-				st.metric("Contract MRO Overheads", f"{sidebar_values['currency_symbol']}{(contract_overheads * display_factor):,.0f}")
-				st.metric("Annual MRO Overheads", f"{sidebar_values['currency_symbol']}{(annual_overheads * display_factor):,.0f}")
-				st.metric("MRO Overheads /FH", f"{sidebar_values['currency_symbol']}{(overheads_cost_per_fh * display_factor):,.0f}")
+				if not is_parts_only_mode:
+					st.metric("Contract MRO Overheads", f"{sidebar_values['currency_symbol']}{(contract_overheads * display_factor):,.0f}")
+					st.metric("Annual MRO Overheads", f"{sidebar_values['currency_symbol']}{(annual_overheads * display_factor):,.0f}")
+					st.metric("MRO Overheads /FH", f"{sidebar_values['currency_symbol']}{(overheads_cost_per_fh * display_factor):,.0f}")
+
+			if is_parts_only_mode and parts_mode_package is not None:
+				st.markdown("---")
+				st.markdown("### Parts Supply Staffing")
+				ps1, ps2, ps3 = st.columns(3)
+				with ps1:
+					st.metric("Parts / Logistics Coordinator", "1")
+				with ps2:
+					st.metric("Coordinator Contract Hours", f"{float(parts_mode_package['coordinator_contract_hours']):,.0f}")
+				with ps3:
+					st.metric("Coordinator Contract Charge", f"{sidebar_values['currency_symbol']}{(float(parts_mode_package['coordinator_contract_charge']) * display_factor):,.0f}")
+				continue
 
 			# ----------------------------------------------------------------
 			# MRO Manpower Planning & Staffing Estimate
