@@ -1008,6 +1008,364 @@ def _build_mro_levels_comparison_charts(values):
 	return comparison_df, fig_total, fig_fh
 
 
+def _matplotlib_figure_to_png(fig):
+	try:
+		import matplotlib
+		matplotlib.use("Agg")
+		buffer = BytesIO()
+		fig.savefig(buffer, format="png", dpi=180, bbox_inches="tight")
+		buffer.seek(0)
+		return buffer.getvalue()
+	finally:
+		try:
+			fig.clf()
+		except Exception:
+			pass
+		try:
+			import matplotlib.pyplot as plt
+			plt.close(fig)
+		except Exception:
+			pass
+
+
+def _build_maintenance_schedule_pdf_chart(values):
+	try:
+		import matplotlib
+		matplotlib.use("Agg")
+		import matplotlib.pyplot as plt
+	except Exception:
+		return None
+
+	scheduled_path = os.path.join("data", "scheduled_events.csv")
+	if not os.path.exists(scheduled_path):
+		return None
+	scheduled_df = pd.read_csv(scheduled_path)
+	if scheduled_df.empty:
+		return None
+
+	fleet_size = int(values.get("fleet_size", 0))
+	annual_hours = float(values.get("annual_hours_per_ac", 0.0))
+	contract_years = int(values.get("years", 0))
+	summary = {}
+	for ac_idx in range(fleet_size):
+		ac_summary = _count_events_for_ac_report(ac_idx, values, scheduled_df)
+		for event_name, count in ac_summary.items():
+			summary[event_name] = summary.get(event_name, 0) + count
+
+	if _is_unscheduled_library_mode(values.get("maintenance_mode")):
+		unsched_path = os.path.join("data", "unscheduled_events.csv")
+		if os.path.exists(unsched_path):
+			unsched_df = pd.read_csv(unsched_path)
+			for _, row in unsched_df.iterrows():
+				event = row.get("Unscheduled Event")
+				if isinstance(event, str):
+					summary[event] = _expected_unscheduled_events(annual_hours) * contract_years * fleet_size
+
+	plot_df = pd.DataFrame([
+		{"Event": key, "Total Events": value}
+		for key, value in summary.items()
+		if value > 0
+	])
+	if plot_df.empty:
+		return None
+
+	plot_df = plot_df.sort_values("Total Events", ascending=False)
+	fig, ax = plt.subplots(figsize=(11, 4.8))
+	ax.bar(plot_df["Event"], plot_df["Total Events"], color="#1f77b4")
+	ax.set_title("Maintenance Schedule: Event Totals (Fleet)")
+	ax.set_xlabel("Event")
+	ax.set_ylabel("Total Events")
+	ax.tick_params(axis="x", rotation=30, labelsize=8)
+	ax.grid(axis="y", alpha=0.25)
+	fig.tight_layout()
+	return _matplotlib_figure_to_png(fig)
+
+
+def _build_maintenance_timeline_pdf_chart(values):
+	try:
+		import matplotlib
+		matplotlib.use("Agg")
+		import matplotlib.pyplot as plt
+	except Exception:
+		return None
+
+	scheduled_path = os.path.join("data", "scheduled_events.csv")
+	if not os.path.exists(scheduled_path):
+		return None
+	scheduled_df = pd.read_csv(scheduled_path)
+	if scheduled_df.empty:
+		return None
+
+	planning_start_date = pd.to_datetime(values["planning_start_date"])
+	n_years = int(values["years"])
+	planning_end_date = planning_start_date + pd.DateOffset(years=n_years)
+	annual_hours = float(values.get("annual_hours_per_ac", 0.0))
+	fleet_size = int(values.get("fleet_size", 0))
+	records = []
+
+	def add_record(event_date, mh, event_type, ac_start, ac_end):
+		if event_date < planning_start_date or event_date >= planning_end_date:
+			return
+		if event_date < ac_start or event_date >= ac_end:
+			return
+		month_idx = (event_date.year - planning_start_date.year) * 12 + (event_date.month - planning_start_date.month)
+		records.append({"Month": month_idx, "Type": event_type, "Manpower": float(mh)})
+
+	for ac_idx in range(fleet_size):
+		ac_start = _get_aircraft_start(values, ac_idx, planning_start_date)
+		ac_end = min(ac_start + pd.DateOffset(years=n_years), planning_end_date)
+		if ac_end <= ac_start:
+			continue
+
+		fh0 = float(values["hours_until_pmi"][ac_idx])
+		contract_duration_years = (ac_end - ac_start).days / 365.25
+		contract_fh_end = contract_duration_years * annual_hours
+		fh_tolerance = 1.0
+		pmi_cycle = ["pmi 1", "pmi 2"]
+		pmi_idx = 0
+		next_pmi_fh = fh0 if fh0 > 0 else 480.0
+		while next_pmi_fh <= contract_fh_end + fh_tolerance:
+			event_key = pmi_cycle[pmi_idx % 2]
+			years_since_start = next_pmi_fh / annual_hours if annual_hours > 0 else 0
+			event_date = ac_start + pd.DateOffset(days=int(years_since_start * 365.25))
+			mh_vals = scheduled_df.loc[
+				scheduled_df["Scheduled Event"].astype(str).str.strip().str.lower() == event_key,
+				"Man-Hours",
+			].values
+			mh = float(mh_vals[0]) if len(mh_vals) > 0 and pd.notna(mh_vals[0]) else 0.0
+			add_record(event_date, mh, "Scheduled", ac_start, ac_end)
+			next_pmi_fh += 480
+			pmi_idx += 1
+
+		for _, row in scheduled_df.iterrows():
+			event = row.get("Scheduled Event", "")
+			if not isinstance(event, str):
+				continue
+			event_key = event.strip().lower()
+			if event_key in ("pmi 1", "pmi 2", "daily pre-flight", ""):
+				continue
+			mh = float(row.get("Man-Hours")) if pd.notna(row.get("Man-Hours")) else 0.0
+			if event_key == "90-day corrosion check":
+				next_date = ac_start + pd.Timedelta(days=90)
+				while next_date <= ac_end:
+					add_record(next_date, mh, "Scheduled", ac_start, ac_end)
+					next_date += pd.Timedelta(days=90)
+			elif event_key == "6-month insp":
+				next_date = ac_start + pd.Timedelta(days=182)
+				while next_date <= ac_end:
+					add_record(next_date, mh, "Scheduled", ac_start, ac_end)
+					next_date += pd.Timedelta(days=182)
+			elif event_key == "annual insp":
+				next_date = ac_start + pd.Timedelta(days=365)
+				while next_date <= ac_end:
+					add_record(next_date, mh, "Scheduled", ac_start, ac_end)
+					next_date += pd.Timedelta(days=365)
+			else:
+				interval_val = row.get("Interval (hrs)")
+				interval = float(interval_val) if pd.notna(interval_val) and interval_val != "" else None
+				if interval is not None and interval > 0:
+					next_event_fh = 0.0
+					while True:
+						next_event_fh += interval
+						if next_event_fh > contract_fh_end + fh_tolerance:
+							break
+						years_since_start = next_event_fh / annual_hours if annual_hours > 0 else 0
+						event_date = ac_start + pd.DateOffset(days=int(years_since_start * 365.25))
+						add_record(event_date, mh, "Scheduled", ac_start, ac_end)
+
+		if _is_unscheduled_library_mode(values.get("maintenance_mode")):
+			unsched_path = os.path.join("data", "unscheduled_events.csv")
+			if os.path.exists(unsched_path):
+				unsched_df = pd.read_csv(unsched_path)
+				expected_events = _expected_unscheduled_events(contract_fh_end)
+				for _, row in unsched_df.iterrows():
+					mh = float(row.get("Avg. Labour Hours")) if pd.notna(row.get("Avg. Labour Hours")) else 0.0
+					if expected_events > 0:
+						event_date = ac_start + pd.DateOffset(days=int((ac_end - ac_start).days / 2))
+						add_record(event_date, mh * expected_events, "Unscheduled", ac_start, ac_end)
+
+	if not records:
+		return None
+
+	plot_df = pd.DataFrame(records).groupby(["Month", "Type"], as_index=False)["Manpower"].sum()
+	total_months = max((planning_end_date.year - planning_start_date.year) * 12 + (planning_end_date.month - planning_start_date.month), 1)
+	month_labels = [(planning_start_date + pd.DateOffset(months=int(month))).strftime("%m/%Y") for month in range(total_months)]
+	pivot_df = plot_df.pivot(index="Month", columns="Type", values="Manpower").fillna(0.0)
+	pivot_df = pivot_df.reindex(range(total_months), fill_value=0.0)
+	fig, ax = plt.subplots(figsize=(11.5, 4.8))
+	bottom = [0.0] * len(pivot_df.index)
+	colors = {"Scheduled": "#1f77b4", "Unscheduled": "#ff7f0e"}
+	for col in pivot_df.columns.tolist():
+		values_col = pivot_df[col].tolist()
+		ax.bar(month_labels, values_col, bottom=bottom, label=col, color=colors.get(col, "#4c78a8"))
+		bottom = [bottom[idx] + values_col[idx] for idx in range(len(values_col))]
+	ax.set_title("Maintenance Timeline: Monthly Manpower (Fleet)")
+	ax.set_xlabel("Month")
+	ax.set_ylabel("Manpower Hours")
+	ax.tick_params(axis="x", rotation=45, labelsize=7)
+	ax.grid(axis="y", alpha=0.25)
+	ax.legend()
+	fig.tight_layout()
+	return _matplotlib_figure_to_png(fig)
+
+
+def _build_costings_fh_cost_pdf_chart(values):
+	try:
+		import matplotlib
+		matplotlib.use("Agg")
+		import matplotlib.pyplot as plt
+	except Exception:
+		return None
+
+	try:
+		costings_df = _build_costings_dataframe(values, apply_escalation=True)
+	except Exception:
+		return None
+
+	contract_fh_total = float(costings_df["Total FH"].sum()) if "Total FH" in costings_df.columns else 0.0
+	if contract_fh_total <= 0:
+		return None
+
+	display_factor = _display_conversion_factor(values)
+	cs = values.get("currency_symbol", "$")
+	component_items = ["Manpower Cost", "Parts Cost", "Management Fee", "MRO Overheads"]
+	present_components = [item for item in component_items if item in costings_df.columns]
+	if not present_components:
+		return None
+
+	component_values = [(float(costings_df[item].sum()) / contract_fh_total) * display_factor for item in present_components]
+	line_values = []
+	running_total = 0.0
+	for value in component_values:
+		running_total += value
+		line_values.append(running_total)
+	line_x = present_components + ["Total Cost"]
+	line_y = line_values + [running_total]
+	x_positions = list(range(len(present_components)))
+	line_positions = list(range(len(line_x)))
+
+	fig, ax = plt.subplots(figsize=(10.5, 4.8))
+	ax.bar(x_positions, component_values, color="#1f77b4")
+	ax.plot(line_positions, line_y, color="#d62728", marker="o", linewidth=2)
+	ax.set_xticks(line_positions)
+	ax.set_xticklabels(line_x, rotation=25, ha="right")
+	ax.set_title("Annual Costings by Contract Year: FH Cost by Costing Item")
+	ax.set_xlabel("Costing Item")
+	ax.set_ylabel(f"FH Cost ({cs})")
+	ax.grid(axis="y", alpha=0.25)
+	for idx, value in enumerate(component_values):
+		ax.text(idx, value, f"{cs}{value:,.0f}", ha="center", va="bottom", fontsize=8)
+	for idx, value in enumerate(line_y):
+		ax.text(line_positions[idx], value, f"{cs}{value:,.0f}", ha="center", va="bottom", fontsize=8)
+	fig.tight_layout()
+	return _matplotlib_figure_to_png(fig)
+
+
+def _build_overheads_fh_cost_pdf_chart(values):
+	try:
+		import matplotlib
+		matplotlib.use("Agg")
+		import matplotlib.pyplot as plt
+	except Exception:
+		return None
+
+	try:
+		costings_df = _build_costings_dataframe(values, apply_escalation=True)
+	except Exception:
+		return None
+
+	contract_fh_total = float(costings_df["Total FH"].sum()) if "Total FH" in costings_df.columns else 0.0
+	if contract_fh_total <= 0:
+		return None
+
+	overhead_cols_present = [label for label, _ in _mro_overhead_categories() if label in costings_df.columns]
+	if not overhead_cols_present:
+		return None
+
+	display_factor = _display_conversion_factor(values)
+	cs = values.get("currency_symbol", "$")
+	overhead_component_values = [(float(costings_df[col].sum()) / contract_fh_total) * display_factor for col in overhead_cols_present]
+	overhead_line_x = overhead_cols_present + ["MRO Overheads"]
+	overhead_line_y = []
+	overhead_running_total = 0.0
+	for value in overhead_component_values:
+		overhead_running_total += value
+		overhead_line_y.append(overhead_running_total)
+	overhead_line_y.append(overhead_running_total)
+	x_positions = list(range(len(overhead_cols_present)))
+	line_positions = list(range(len(overhead_line_x)))
+
+	fig, ax = plt.subplots(figsize=(11, 4.8))
+	ax.bar(x_positions, overhead_component_values, color="#1f77b4")
+	ax.plot(line_positions, overhead_line_y, color="#d62728", marker="o", linewidth=2)
+	ax.set_xticks(line_positions)
+	ax.set_xticklabels(overhead_line_x, rotation=35, ha="right")
+	ax.set_title("Annual MRO Overheads Breakdown: FH Cost by Overhead Item")
+	ax.set_xlabel("Overhead Item")
+	ax.set_ylabel(f"FH Cost ({cs})")
+	ax.grid(axis="y", alpha=0.25)
+	for idx, value in enumerate(overhead_component_values):
+		ax.text(idx, value, f"{cs}{value:,.0f}", ha="center", va="bottom", fontsize=8)
+	for idx, value in enumerate(overhead_line_y):
+		ax.text(line_positions[idx], value, f"{cs}{value:,.0f}", ha="center", va="bottom", fontsize=8)
+	fig.tight_layout()
+	return _matplotlib_figure_to_png(fig)
+
+
+def _build_mro_levels_comparison_pdf_charts(values):
+	try:
+		import matplotlib
+		matplotlib.use("Agg")
+		import matplotlib.pyplot as plt
+	except Exception:
+		return pd.DataFrame(), None, None
+
+	comparison_df = _calculate_mro_levels_comparison(values)
+	if comparison_df.empty:
+		return comparison_df, None, None
+
+	display_factor = _display_conversion_factor(values)
+	currency_symbol = values.get("currency_symbol", "$")
+	mro_order = ["Lean", "Standard", "Full"]
+	comparison_df = comparison_df.copy()
+	comparison_df["MRO Level"] = pd.Categorical(comparison_df["MRO Level"], categories=mro_order, ordered=True)
+	comparison_df = comparison_df.sort_values(["Maintenance Approach", "MRO Level"])
+	approaches = comparison_df["Maintenance Approach"].dropna().unique().tolist()
+	x_base = list(range(len(mro_order)))
+	bar_width = 0.8 / max(len(approaches), 1)
+	colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
+
+	fig_total, ax_total = plt.subplots(figsize=(10.5, 4.8))
+	fig_fh, ax_fh = plt.subplots(figsize=(10.5, 4.8))
+	for idx, approach in enumerate(approaches):
+		approach_data = comparison_df[comparison_df["Maintenance Approach"] == approach].set_index("MRO Level").reindex(mro_order)
+		x_positions = [base + (idx - (len(approaches) - 1) / 2) * bar_width for base in x_base]
+		total_vals = [(0.0 if pd.isna(val) else float(val) * display_factor) for val in approach_data["Total Cost"].tolist()]
+		fh_vals = [(0.0 if pd.isna(val) else float(val) * display_factor) for val in approach_data["Cost/FH"].tolist()]
+		ax_total.bar(x_positions, total_vals, width=bar_width, label=approach, color=colors[idx % len(colors)])
+		ax_fh.bar(x_positions, fh_vals, width=bar_width, label=approach, color=colors[idx % len(colors)])
+
+	ax_total.set_xticks(x_base)
+	ax_total.set_xticklabels(mro_order)
+	ax_total.set_title("Total Contract Cost by MRO Level and Maintenance Approach")
+	ax_total.set_xlabel("MRO Capability Level")
+	ax_total.set_ylabel(f"Total Contract Cost ({currency_symbol})")
+	ax_total.grid(axis="y", alpha=0.25)
+	ax_total.legend()
+
+	ax_fh.set_xticks(x_base)
+	ax_fh.set_xticklabels(mro_order)
+	ax_fh.set_title("Cost per Flight Hour by MRO Level and Maintenance Approach")
+	ax_fh.set_xlabel("MRO Capability Level")
+	ax_fh.set_ylabel(f"Cost/FH ({currency_symbol})")
+	ax_fh.grid(axis="y", alpha=0.25)
+	ax_fh.legend()
+
+	fig_total.tight_layout()
+	fig_fh.tight_layout()
+	return comparison_df, _matplotlib_figure_to_png(fig_total), _matplotlib_figure_to_png(fig_fh)
+
+
 def _build_report_sections(values):
 	scheduled_path = os.path.join("data", "scheduled_events.csv")
 	unsched_path = os.path.join("data", "unscheduled_events.csv")
@@ -1303,18 +1661,17 @@ def _build_pdf_report(values):
 	except Exception as exc:
 		sections = [("Dashboard", [f"Report content generation failed: {exc}"])]
 
-	# Chart images are not embedded in the PDF (kaleido hangs in hosted environments).
-	maintenance_schedule_fig = None
-	maintenance_timeline_fig = None
-	costings_fh_cost_fig = None
-	overheads_fh_cost_fig = None
+	maintenance_schedule_fig = _build_maintenance_schedule_pdf_chart(values)
+	maintenance_timeline_fig = _build_maintenance_timeline_pdf_chart(values)
+	costings_fh_cost_fig = _build_costings_fh_cost_pdf_chart(values)
+	overheads_fh_cost_fig = _build_overheads_fh_cost_pdf_chart(values)
 	mro_comparison_df = pd.DataFrame()
 	mro_comparison_total_fig = None
 	mro_comparison_fh_fig = None
 	mro_comparison_error = None
 	if not is_parts_only_mode:
 		try:
-			mro_comparison_df, _, _ = _build_mro_levels_comparison_charts(values)
+			mro_comparison_df, mro_comparison_total_fig, mro_comparison_fh_fig = _build_mro_levels_comparison_pdf_charts(values)
 		except Exception as exc:
 			mro_comparison_error = str(exc)
 			mro_comparison_df = pd.DataFrame()
@@ -1322,9 +1679,14 @@ def _build_pdf_report(values):
 	y = page_height - 120
 
 	def draw_chart_in_pdf(fig, current_y):
-		# Chart image export is skipped in PDF (kaleido subprocess hangs in hosted environments).
-		# Charts are viewable interactively in the app.
-		return current_y
+		if fig is None:
+			return current_y
+		chart_width = page_width - (2 * margin)
+		chart_height = chart_width * 0.5
+		current_y = ensure_space(current_y, chart_height + 12)
+		img_reader = ImageReader(BytesIO(fig))
+		pdf.drawImage(img_reader, margin, current_y - chart_height, width=chart_width, height=chart_height, preserveAspectRatio=True, mask='auto')
+		return current_y - chart_height - 10
 
 	def draw_mro_table_in_pdf(mro_data, current_y):
 		from reportlab.platypus import Table, TableStyle
@@ -1493,11 +1855,8 @@ def _build_pdf_report(values):
 			y -= 12
 		else:
 			y = draw_mro_comparison_table_in_pdf(mro_comparison_df, y)
-			y = ensure_space(y, 12)
-			pdf.setFont("Helvetica-Oblique", 9)
-			pdf.drawString(margin, y, "Interactive comparison graphs are available in the app; the PDF includes the comparison table only.")
-			y -= 12
-			pdf.setFont("Helvetica", 9)
+			y = draw_chart_in_pdf(mro_comparison_total_fig, y)
+			y = draw_chart_in_pdf(mro_comparison_fh_fig, y)
 
 	pdf.save()
 	buffer.seek(0)
