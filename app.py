@@ -2642,6 +2642,14 @@ for i, tab in enumerate(selected_tab):
 			costings_df = _build_costings_dataframe(costings_inputs, apply_escalation=apply_escalation)
 			display_factor = _display_conversion_factor(sidebar_values)
 			n_years = int(sidebar_values["years"])
+			is_parts_only_mode = _is_parts_supply_only_mode(sidebar_values.get("maintenance_mode"))
+			parts_mode_package = None
+			if is_parts_only_mode:
+				parts_mode_package = _compute_parts_supply_only_contract_package(
+					costings_inputs,
+					costings_df=costings_df,
+					apply_escalation=apply_escalation,
+				)
 			annual_hours = float(sidebar_values["annual_hours_per_ac"])
 			fleet_size = int(sidebar_values["fleet_size"])
 			contingency_multiplier = float(sidebar_values.get("geographic_contingency_multiplier", 1.0))
@@ -2783,6 +2791,9 @@ for i, tab in enumerate(selected_tab):
 			c1, c2, c3, c4 = st.columns(4)
 			contract_fh_total = costings_df["Total FH"].sum()
 			contract_manpower_hours_total = costings_df["Manpower Hrs"].sum()
+			display_contract_manpower_hours_total = contract_manpower_hours_total
+			if is_parts_only_mode and parts_mode_package is not None:
+				display_contract_manpower_hours_total = float(parts_mode_package["coordinator_contract_hours"])
 			manpower_cost_per_fh = (costings_df["Manpower Cost"].sum() / contract_fh_total) if contract_fh_total > 0 else 0.0
 			parts_cost_per_fh = (costings_df["Parts Cost"].sum() / contract_fh_total) if contract_fh_total > 0 else 0.0
 			overheads_cost_per_fh = (costings_df["MRO Overheads"].sum() / contract_fh_total) if contract_fh_total > 0 else 0.0
@@ -2800,7 +2811,7 @@ for i, tab in enumerate(selected_tab):
 				st.metric("Annual Management Fee", f"{sidebar_values['currency_symbol']}{(annual_management_fee * display_factor):,.0f}")
 				st.metric("Management Fee / FH", f"{sidebar_values['currency_symbol']}{(management_fee_per_fh * display_factor):,.0f}")
 			with c2:
-				st.metric("Contract Manpower Hrs", f"{costings_df['Manpower Hrs'].sum():.0f}")
+				st.metric("Contract Manpower Hrs", f"{display_contract_manpower_hours_total:.0f}")
 			with c3:
 				st.metric("Contract Manpower Cost", f"{sidebar_values['currency_symbol']}{(costings_df['Manpower Cost'].sum() * display_factor):,.0f}")
 				st.metric("Contract Manpower Cost Delta", f"{sidebar_values['currency_symbol']}{(contract_manpower_cost_delta * display_factor):,.0f}")
