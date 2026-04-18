@@ -164,9 +164,20 @@ def show_sidebar():
         st.session_state["scenario_name_input"] = pending_selection
         st.session_state["saved_scenario_select"] = pending_selection
 
+    pending_delete_selection = st.session_state.pop("_pending_post_delete_selection", None)
+    if pending_delete_selection is not None:
+        st.session_state["saved_scenario_select"] = pending_delete_selection
+
+    if st.session_state.pop("_pending_reset_delete_confirm", False):
+        st.session_state["confirm_delete_scenario_checkbox"] = False
+
     pending_save_success = st.session_state.pop("_pending_save_success", None)
     if pending_save_success:
         st.sidebar.success(f"Saved scenario: {pending_save_success}")
+
+    pending_delete_success = st.session_state.pop("_pending_delete_success", None)
+    if pending_delete_success:
+        st.sidebar.success(f"Deleted scenario: {pending_delete_success}")
 
     if st.sidebar.button("Reset to Defaults", use_container_width=True):
         _reset_sidebar_defaults()
@@ -191,7 +202,11 @@ def show_sidebar():
         ["(none)"] + scenario_files,
         key="saved_scenario_select"
     )
-    col_load, col_save = st.sidebar.columns(2)
+    confirm_delete_scenario = st.sidebar.checkbox(
+        "Confirm delete selected scenario",
+        key="confirm_delete_scenario_checkbox"
+    )
+    col_load, col_save, col_delete = st.sidebar.columns(3)
     with col_load:
         if st.button("Load", key="load_selected_scenario"):
             if selected_scenario != "(none)":
@@ -213,6 +228,15 @@ def show_sidebar():
             else:
                 # Save is executed after all sidebar widgets are evaluated so current values are persisted.
                 st.session_state["_pending_save_scenario_name"] = target_scenario
+    with col_delete:
+        if st.button("Delete", key="delete_selected_scenario"):
+            if selected_scenario == "(none)":
+                st.warning("Select a saved scenario first.")
+            elif not confirm_delete_scenario:
+                st.warning("Tick 'Confirm delete selected scenario' before deleting.")
+            else:
+                # Deletion is executed after all sidebar widgets are evaluated.
+                st.session_state["_pending_delete_scenario_name"] = selected_scenario
 
     typed_name_preview = _sanitize_scenario_name(st.session_state.get("scenario_name_input", ""))
     resolved_save_target = typed_name_preview if typed_name_preview else (selected_scenario if selected_scenario != "(none)" else "(none)")
@@ -428,6 +452,23 @@ def show_sidebar():
         st.session_state["_pending_post_save_selection"] = pending_save_name
         st.session_state["_pending_save_success"] = pending_save_name
         st.rerun()
+
+    pending_delete_name = st.session_state.pop("_pending_delete_scenario_name", None)
+    if pending_delete_name:
+        try:
+            selected_path = scenarios_path / f"{pending_delete_name}.json"
+            if selected_path.exists():
+                selected_path.unlink()
+                st.session_state["_pending_post_delete_selection"] = "(none)"
+                st.session_state["_pending_reset_delete_confirm"] = True
+                if st.session_state.get("scenario_last_loaded") == pending_delete_name:
+                    st.session_state["scenario_last_loaded"] = "None"
+                st.session_state["_pending_delete_success"] = pending_delete_name
+                st.rerun()
+            else:
+                st.error("Selected scenario file does not exist.")
+        except Exception as exc:
+            st.error(f"Unable to delete selected scenario file: {exc}")
 
     # Return all sidebar values as a dict
     return {
